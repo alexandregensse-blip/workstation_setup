@@ -1,0 +1,4 @@
+# Rien de sensible ne doit entrer dans ce repo.
+*.bak
+*.log
+.DS_Store
