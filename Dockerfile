@@ -13,6 +13,8 @@ FROM cgr.dev/chainguard/wolfi-base
 
 # 1. System tools via apk (glibc). gh ships in Wolfi's repos (no external apt repo needed).
 #    bash is required by the Claude installer; jq by the status line.
+#    python3 is KEPT on purpose: `uv -p 3.13` reuses it, which is SMALLER than letting uv
+#    download a standalone CPython (measured: with python3 = 194 MB, without = 215 MB).
 USER root
 RUN apk add --no-cache bash curl git ripgrep python3 gh jq ca-certificates-bundle shadow
 
@@ -29,7 +31,7 @@ RUN curl -fsSL https://claude.ai/install.sh | bash
 RUN uv tool install -p 3.13 serena-agent && serena init
 RUN curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh
 
-# 4. Hand-made dotfiles (Serena policy, prefs, statusline, convention)
+# 4. Hand-made dotfiles (Serena policy, prefs + hooks, statusline, convention)
 RUN mkdir -p /home/dev/.claude /home/dev/dev
 COPY --chown=dev:dev claude/CLAUDE.md     /home/dev/.claude/CLAUDE.md
 COPY --chown=dev:dev claude/CLAUDE.md     /home/dev/dev/AGENTS.md
@@ -37,8 +39,14 @@ COPY --chown=dev:dev claude/settings.json /home/dev/.claude/settings.json
 COPY --chown=dev:dev claude/statusline.sh /home/dev/.claude/statusline.sh
 COPY --chown=dev:dev dev/CLAUDE.md        /home/dev/dev/CLAUDE.md
 
-# 5. Wire Serena (MCP) + rtk, and let git push via the gh token at run time
-RUN serena setup claude-code && rtk init -g --auto-patch \
+# Optional Claude UI language baked into the image (install.sh passes the resolved value).
+ARG WS_LANG=
+RUN [ -z "$WS_LANG" ] || { tmp="$(mktemp)"; jq --arg l "$WS_LANG" '.language=$l' \
+      /home/dev/.claude/settings.json > "$tmp" && mv "$tmp" /home/dev/.claude/settings.json; }
+
+# 5. Register Serena (MCP), create RTK.md/@RTK.md WITHOUT touching settings.json (hooks are
+#    already declared in settings.json), and let git push via the gh token at run time.
+RUN serena setup claude-code && rtk init -g --no-patch \
  && git config --global credential.https://github.com.helper '!gh auth git-credential'
 
 # The task's code is mounted here at run time; auth arrives via env vars / mount.

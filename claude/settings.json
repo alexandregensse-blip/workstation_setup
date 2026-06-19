@@ -4,12 +4,26 @@
     "command": "bash ~/.claude/statusline.sh",
     "padding": 0
   },
-  "language": "francais",
   "voice": {
     "enabled": true,
     "mode": "hold"
   },
   "theme": "dark",
   "voiceEnabled": true,
-  "effortLevel": "xhigh"
+  "effortLevel": "xhigh",
+  "hooks": {
+    "SessionStart": [
+      { "matcher": "", "hooks": [ { "type": "command", "command": "serena-hooks activate" } ] }
+    ],
+    "PreToolUse": [
+      { "matcher": "", "hooks": [
+        { "type": "command", "command": "serena-hooks remind" },
+        { "type": "command", "command": "serena-hooks auto-approve" }
+      ] },
+      { "matcher": "Bash", "hooks": [ { "type": "command", "command": "rtk hook claude" } ] }
+    ],
+    "SessionEnd": [
+      { "matcher": "", "hooks": [ { "type": "command", "command": "serena-hooks cleanup" } ] }
+    ]
+  }
 }

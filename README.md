@@ -4,6 +4,8 @@ Portable workstation. On a fresh machine (Ubuntu), **one command** installs ever
 Claude Code (**Serena** MCP + rtk), sets up Docker, and adds the `task` command for **isolated
 sessions**. No machine-specific absolute paths (everything is `$HOME`-relative).
 
+> Full design & every behavior: **[DESIGN.md](DESIGN.md)**. Serena + rtk hooks are configured automatically.
+
 ## Install — one command
 
 ```bash
@@ -28,6 +30,7 @@ curl -fsSL .../install.sh | bash -s -- --home ~/dev --yes
 | `--home`  / `WORKSTATION_HOME`  | workspace dir for task clones | prompt, else `~/dev` |
 | `--repos` / `WORKSTATION_REPOS` | tasks base | `<home>/repos` |
 | `--dir`   / `WORKSTATION_DIR`   | where the workstation lives | `~/.local/share/workstation` (hidden) |
+| `--lang`  / `WORKSTATION_LANG`  | Claude UI language | keep host pref, else system default |
 | `--yes` / `-y` | non-interactive (skip the prompt) | — |
 
 ## Work

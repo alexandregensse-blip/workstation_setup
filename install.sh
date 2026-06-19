@@ -11,6 +11,7 @@
 #   --home  <path>  (WORKSTATION_HOME)   workspace dir for task clones  [prompt; default ~/dev]
 #   --repos <path>  (WORKSTATION_REPOS)  tasks base                     [default <home>/repos]
 #   --dir   <path>  (WORKSTATION_DIR)    where the workstation lives    [default ~/.local/share/workstation, hidden]
+#   --lang  <code>  (WORKSTATION_LANG)   Claude UI language             [default: keep host pref, else system default]
 #   --yes | -y                           non-interactive (skip prompt)
 # Re-installs/configures only what is missing. No machine-specific absolute paths ($HOME-relative).
 set -euo pipefail
@@ -18,6 +19,7 @@ set -euo pipefail
 WS_DIR="${WORKSTATION_DIR:-$HOME/.local/share/workstation}"
 WS_HOME="${WORKSTATION_HOME:-}"
 WS_REPOS="${WORKSTATION_REPOS:-}"
+WS_LANG="${WORKSTATION_LANG:-}"
 ASSUME_YES=0
 WS_URL="https://github.com/alexandregensse-blip/workstation_setup"
 
@@ -26,8 +28,9 @@ while [ $# -gt 0 ]; do
     --home)   WS_HOME="${2:?--home requires a path}";   WS_HOME="${WS_HOME/#\~/$HOME}";   shift 2 ;;
     --repos)  WS_REPOS="${2:?--repos requires a path}"; WS_REPOS="${WS_REPOS/#\~/$HOME}"; shift 2 ;;
     --dir)    WS_DIR="${2:?--dir requires a path}";     WS_DIR="${WS_DIR/#\~/$HOME}";     shift 2 ;;
+    --lang)   WS_LANG="${2:?--lang requires a code}";   shift 2 ;;
     -y|--yes) ASSUME_YES=1; shift ;;
-    *) echo "unknown flag: $1  (use --home / --repos / --dir / --yes)"; exit 1 ;;
+    *) echo "unknown flag: $1  (use --home / --repos / --dir / --lang / --yes)"; exit 1 ;;
   esac
 done
 
@@ -58,7 +61,7 @@ sudo -v
 
 log "system packages (install only what's missing)"
 need=""
-for pair in curl:curl git:git ripgrep:rg gh:gh nodejs:node npm:npm docker.io:docker; do
+for pair in curl:curl git:git ripgrep:rg gh:gh nodejs:node npm:npm docker.io:docker jq:jq; do
   have "${pair#*:}" || need="$need ${pair%:*}"
 done
 if [ -n "$need" ]; then sudo apt update && sudo apt install -y $need; else echo "  all present ✓"; fi
@@ -81,6 +84,11 @@ serena init >/dev/null 2>&1 || true
 log "rtk";    have rtk    || curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh
 
 log "dotfiles + workspace + task command (auto-sourced)"
+# Claude UI language: --lang flag > existing host preference > unset (system default).
+ws_lang="$WS_LANG"
+if [ -z "$ws_lang" ] && [ -f "$HOME/.claude/settings.json" ]; then
+  ws_lang="$(jq -r '.language // empty' "$HOME/.claude/settings.json" 2>/dev/null || true)"
+fi
 mkdir -p "$HOME/.claude" "$WS_HOME" "$WS_REPOS" "$HOME/.local/share/workstation-shell"
 cp "$REPO_DIR/claude/CLAUDE.md"     "$HOME/.claude/CLAUDE.md"
 cp "$REPO_DIR/claude/CLAUDE.md"     "$WS_HOME/AGENTS.md"
@@ -89,6 +97,10 @@ cp "$REPO_DIR/claude/statusline.sh" "$HOME/.claude/statusline.sh"
 cp "$REPO_DIR/dev/CLAUDE.md"        "$WS_HOME/CLAUDE.md"
 cp "$REPO_DIR/shell/task.sh"        "$HOME/.local/share/workstation-shell/task.sh"
 chmod +x "$HOME/.claude/statusline.sh"
+# keep the language preference (flag / existing host), else leave it unset = system default
+if [ -n "$ws_lang" ]; then
+  tmp="$(mktemp)"; jq --arg l "$ws_lang" '.language=$l' "$HOME/.claude/settings.json" > "$tmp" && mv "$tmp" "$HOME/.claude/settings.json"
+fi
 if ! grep -q 'workstation-shell/task.sh' "$HOME/.bashrc" 2>/dev/null; then
   { [ "$WS_REPOS" != "$HOME/dev/repos" ] && echo "export WORKSTATION_REPOS=\"$WS_REPOS\""
     echo 'source "$HOME/.local/share/workstation-shell/task.sh"'; } >> "$HOME/.bashrc"
@@ -97,14 +109,14 @@ fi
 log "Serena MCP (skip if already registered)"
 claude mcp list 2>/dev/null | grep -q '^serena' || serena setup claude-code
 
-log "rtk init — last (skip if already done)"
-[ -f "$HOME/.claude/RTK.md" ] || rtk init -g --auto-patch
+log "rtk RTK.md/@RTK.md — hooks already declared in settings.json (skip if done)"
+[ -f "$HOME/.claude/RTK.md" ] || rtk init -g --no-patch
 
 log "docker group (skip if already a member)"
 getent group docker | grep -qw "$(id -un)" || sudo usermod -aG docker "$USER"
 
 log "docker image 'workstation' (build if missing)"
-dock image inspect workstation >/dev/null 2>&1 || dock build -t workstation "$REPO_DIR"
+dock image inspect workstation >/dev/null 2>&1 || dock build --build-arg "WS_LANG=$ws_lang" -t workstation "$REPO_DIR"
 
 log "authentication (env tokens if present, else browser)"
 gh auth status     >/dev/null 2>&1 || gh auth login --web --git-protocol https
