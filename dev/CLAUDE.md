@@ -1,6 +1,6 @@
 # ~/dev — convention de travail multi-repo
 
-> Complète les règles globales (`~/.claude/CLAUDE.md`, générées par jcodemunch).
+> Complète la politique globale (`~/.claude/CLAUDE.md`, orientée Serena).
 > Ici : gestion multi-repo / multi-session.
 
 ## Principe
@@ -22,6 +22,7 @@ Un dossier de tâche peut être supprimé à tout moment SANS perte si tout est 
    ```
 
 3. **Brancher** : `cd` dedans → `git switch -c task/<slug>` → `git push -u origin task/<slug>`.
+   Activer le projet dans Serena (`activate_project` / `--project-from-cwd`).
 
 4. **Travailler**, en poussant à chaque étape terminée et correcte.
 
@@ -29,14 +30,7 @@ Un dossier de tâche peut être supprimé à tout moment SANS perte si tout est 
    - `git status --porcelain` vide (rien de non commité / non suivi de valeur), ET
    - `git log @{u}..` vide (rien de non poussé).
 
-   Sinon pousser d'abord. Puis, dans l'ordre :
-   ```bash
-   jcodemunch-mcp delete-index ~/dev/repos/<name>/${ts}_${slug}  # libère index + watcher
-   rm -rf ~/dev/repos/<name>/${ts}_${slug}
-   ```
-   > Les tâches sont des **clones**, pas des worktrees : le hook `WorktreeRemove` ne se
-   > déclenche pas, donc on libère l'index jcodemunch à la main avant le `rm -rf`.
-
-   La branche **distante RESTE** (PR / archive / collaboration).
+   Sinon pousser d'abord. Puis `rm -rf` le dossier (le cache Serena `.serena/` part avec lui ;
+   pas d'index externe à libérer, contrairement à un watcher). La branche **distante RESTE**.
 
 Pas d'auto-push : un crash en cours de tâche → on refait la tâche.

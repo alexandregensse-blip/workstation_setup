@@ -1,57 +1,63 @@
 # workstation_setup
 
-Workstation **portable**. Sur une machine neuve (Ubuntu), on clone ce repo et on lance
-`install.sh` : ça installe tous les outils, recrée la structure `~/dev/repos/`, et configure
-Claude Code prêt à l'emploi.
+Workstation **portable**. Sur une machine neuve (Ubuntu), **une seule commande** installe tous
+les outils, recrée `~/dev/repos/`, configure Claude Code, et pose Docker + la commande `task`
+pour travailler en **sessions isolées**.
 
 ## Installation (machine neuve)
 
-```bash
-# 1. De quoi s'authentifier sur GitHub (ce repo est privé)
-sudo apt update && sudo apt install -y gh
-gh auth login
-
-# 2. Cloner + TOUT installer
-gh repo clone alexandregensse-blip/workstation_setup ~/workstation_setup
-cd ~/workstation_setup && ./install.sh
-```
-
-Puis deux étapes interactives que le script ne peut pas automatiser :
+Le repo est public → commande unique (aucune auth nécessaire pour récupérer le script) :
 
 ```bash
-claude            # se connecter (compte / clé API)
-gh auth status    # vérifier l'auth GitHub
+bash <(curl -fsSL https://raw.githubusercontent.com/alexandregensse-blip/workstation_setup/main/install.sh)
 ```
 
-Ensuite : lance `claude` depuis `~/dev` et dis « travaille sur \<repo\>, sujet \<B\> »
-(voir `dev/CLAUDE.md` pour la convention multi-repo).
+Le script gère l'élévation de droits (`sudo -v`), installe tout, puis lance l'auth GitHub + Claude
+(via navigateur) — **sauf** si tu fournis `GH_TOKEN` / `CLAUDE_CODE_OAUTH_TOKEN` en variables
+d'environnement (install entièrement automatique alors). `claude setup-token` une fois sur une
+machine donne un jeton long réutilisable.
+
+Après l'install : déconnecte/reconnecte (pour le groupe `docker`), puis construis l'image une fois :
+
+```bash
+docker build -t workstation ~/workstation_setup
+```
+
+## Travailler — deux modes
+
+- **Sur l'hôte** (rapide) : `claude` depuis `~/dev`.
+- **En session isolée** (recommandé) : `task <repo> <sujet>` — clone sur l'hôte, crée la branche
+  `task/<slug>`, et lance **Claude dans un conteneur jetable** (toolchain figé, ton clone monté,
+  auth réutilisée depuis tes logins hôte). À la sortie, le conteneur est détruit, le clone reste.
+  Voir `shell/task.sh` et `Dockerfile`.
+
+> Isolation forte : tout ce que fait Claude (bash, édition, Serena) reste dans le conteneur.
+> C'est le **Pattern C / modèle A**. Le côté autodev (agents headless) réutilisera la même image,
+> avec auth par jetons, identité bot dédiée et sandbox renforcé (phase ultérieure).
 
 ## Ce que fait `install.sh` (l'ordre compte)
 
-`jcodemunch` et `rtk` s'installent **eux-mêmes** dans la config Claude via leur propre `init`
-(ils modifient `~/.claude/CLAUDE.md` et `~/.claude/settings.json`). D'où l'ordre :
+Serena et rtk se branchent dans la config Claude via leur propre setup/init (ils modifient
+`~/.claude/CLAUDE.md` et `settings.json`). D'où l'ordre :
 
-1. paquets système (`apt`) : gh, node, npm, ripgrep
+1. `apt` : gh, node, npm, ripgrep, **docker.io**
 2. `uv`
-3. Claude Code (installeur natif, pas npm)
-4. `jcodemunch-mcp` (via `uv tool` ; pas de toolchain Rust requise)
-5. `rtk` (binaire précompilé, **sans** Rust)
-6. dotfiles fait-main (préférences `settings.json`, `statusline.sh`, `dev/CLAUDE.md`,
-   `dev/AGENTS.md`) + `mkdir -p ~/dev/repos`
-7. `jcodemunch-mcp init` → enregistre le MCP, écrit la politique `CLAUDE.md`, pose les hooks
-8. `jcodemunch-mcp watch-install` → watcher systemd (auto-réindexation)
-9. `rtk init -g` → **EN DERNIER** : ajoute `@RTK.md` à `CLAUDE.md`, patche `settings.json`
+3. Claude Code (installeur natif)
+4. **Serena** (`uv tool install -p 3.13 serena-agent` + `serena init`) — MCP de code, MIT
+5. `rtk` (binaire, sans Rust)
+6. dotfiles fait-main (politique Serena, `settings.json`, `statusline.sh`, `dev/CLAUDE.md`) +
+   `~/dev/repos` + déploiement de la commande `task`
+7. `serena setup claude-code` → MCP Serena + hooks
+8. `rtk init -g` → **EN DERNIER** (ajoute `@RTK.md`, patche `settings.json`)
+9. groupe `docker` pour ton user
+10. auth GitHub + Claude
 
-Le repo ne stocke **que** le fait-main. La politique globale `~/.claude/CLAUDE.md` et les hooks
-sont **régénérés** par les `init` (toujours à jour avec la version installée).
-`~/.claude.json` (secrets + état machine) n'est **jamais** versionné.
+Le repo ne stocke **que** le fait-main ; les hooks sont posés par les setup respectifs.
+`~/.claude.json` (secrets/état) n'est **jamais** versionné.
 
 ## Mise à jour
 
-Pas d'auto-update natif. Manuellement :
-
 ```bash
-jcodemunch-mcp upgrade --yes          # met à jour jcodemunch + rafraîchit hooks/config
-uv tool upgrade jcodemunch-mcp        # (équivalent côté uv)
-# rtk / claude : relancer leur installeur respectif
+uv tool upgrade serena-agent            # Serena
+docker build -t workstation ~/workstation_setup   # reconstruire l'image après MAJ d'outils
 ```
