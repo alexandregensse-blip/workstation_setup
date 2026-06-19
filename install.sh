@@ -2,21 +2,36 @@
 # workstation_setup — installeur unique et idempotent (Ubuntu).
 #
 # Machine neuve, UNE commande :
-#   bash <(curl -fsSL https://raw.githubusercontent.com/alexandregensse-blip/workstation_setup/main/install.sh)
+#   curl -fsSL https://raw.githubusercontent.com/alexandregensse-blip/workstation_setup/main/install.sh | bash
 #
-# Variables d'environnement surchargeables (toutes optionnelles) :
+# (Le prompt et sudo lisent sur /dev/tty, donc le format pipe fonctionne.)
+#
+# Variables d'env surchargeables (sautent le prompt si définies) :
 #   WORKSTATION_DIR    où vit la workstation       (défaut: $HOME/.local/share/workstation, caché)
-#   WORKSTATION_HOME   ton espace de travail        (défaut: $HOME/dev)
+#   WORKSTATION_HOME   espace de travail            (sinon demandé au prompt ; défaut $HOME/dev)
 #   WORKSTATION_REPOS  base des clones de tâches     (défaut: $WORKSTATION_HOME/repos)
 # Aucun chemin absolu machine-spécifique : tout est relatif à $HOME.
 set -euo pipefail
 
 WS_DIR="${WORKSTATION_DIR:-$HOME/.local/share/workstation}"
-WS_HOME="${WORKSTATION_HOME:-$HOME/dev}"
-WS_REPOS="${WORKSTATION_REPOS:-$WS_HOME/repos}"
 WS_URL="https://github.com/alexandregensse-blip/workstation_setup"
 log(){ printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
 export PATH="$HOME/.local/bin:$PATH"
+
+# --- Choix de l'espace de travail : prompt (sauf si fixé par env ou pas de terminal) ---
+if [ -z "${WORKSTATION_HOME:-}" ] && [ -r /dev/tty ]; then
+  printf '\nOù veux-tu ton espace de travail (les clones de tâches) ?\n'
+  printf '  1) %s   (défaut)\n  2) le dossier courant : %s\n  3) un autre chemin\n' "$HOME/dev" "$PWD"
+  printf 'Choix [1/2/3] : '
+  read -r _ch < /dev/tty || _ch=1
+  case "$_ch" in
+    2) WORKSTATION_HOME="$PWD" ;;
+    3) printf 'Chemin : '; read -r WORKSTATION_HOME < /dev/tty; WORKSTATION_HOME="${WORKSTATION_HOME/#\~/$HOME}" ;;
+    *) WORKSTATION_HOME="$HOME/dev" ;;
+  esac
+fi
+WS_HOME="${WORKSTATION_HOME:-$HOME/dev}"
+WS_REPOS="${WORKSTATION_REPOS:-$WS_HOME/repos}"
 
 log "0 · élévation de droits (sudo)"
 sudo -v
@@ -51,14 +66,13 @@ command -v rtk >/dev/null || curl -fsSL https://raw.githubusercontent.com/rtk-ai
 
 log "6 · dotfiles + espace de travail + commande task (source auto)"
 mkdir -p "$HOME/.claude" "$WS_HOME" "$WS_REPOS" "$HOME/.local/share/workstation-shell"
-cp "$REPO_DIR/claude/CLAUDE.md"     "$HOME/.claude/CLAUDE.md"   # politique Serena
-cp "$REPO_DIR/claude/CLAUDE.md"     "$WS_HOME/AGENTS.md"        # même politique, cross-tool
+cp "$REPO_DIR/claude/CLAUDE.md"     "$HOME/.claude/CLAUDE.md"
+cp "$REPO_DIR/claude/CLAUDE.md"     "$WS_HOME/AGENTS.md"
 cp "$REPO_DIR/claude/settings.json" "$HOME/.claude/settings.json"
 cp "$REPO_DIR/claude/statusline.sh" "$HOME/.claude/statusline.sh"
-cp "$REPO_DIR/dev/CLAUDE.md"        "$WS_HOME/CLAUDE.md"        # convention multi-repo
+cp "$REPO_DIR/dev/CLAUDE.md"        "$WS_HOME/CLAUDE.md"
 cp "$REPO_DIR/shell/task.sh"        "$HOME/.local/share/workstation-shell/task.sh"
 chmod +x "$HOME/.claude/statusline.sh"
-# source automatique de `task` (idempotent) + base par défaut si non standard
 if ! grep -q 'workstation-shell/task.sh' "$HOME/.bashrc" 2>/dev/null; then
   { [ "$WS_REPOS" != "$HOME/dev/repos" ] && echo "export WORKSTATION_REPOS=\"$WS_REPOS\""
     echo 'source "$HOME/.local/share/workstation-shell/task.sh"'; } >> "$HOME/.bashrc"
@@ -73,19 +87,44 @@ rtk init -g --auto-patch
 log "9 · groupe docker pour ton user (effet après reconnexion)"
 sudo usermod -aG docker "$USER"
 
-log "10 · image docker 'workstation' (via sudo, fenêtre sudo encore ouverte)"
+log "10 · image docker 'workstation'"
 sudo docker image inspect workstation >/dev/null 2>&1 || sudo docker build -t workstation "$REPO_DIR"
 
 log "11 · authentification (zéro-touche si jetons en env, sinon navigateur)"
 gh auth status     >/dev/null 2>&1 || gh auth login
 claude auth status >/dev/null 2>&1 || claude auth login
 
-cat <<EOF
+# --- Confirmation de bonne installation ---
+log "Vérification"
+ok=1
+for c in uv claude serena rtk docker gh; do
+  if command -v "$c" >/dev/null; then echo "  ✓ $c"; else echo "  ✗ $c MANQUANT"; ok=0; fi
+done
+if sudo docker image inspect workstation >/dev/null 2>&1; then echo "  ✓ image docker 'workstation'"; else echo "  ✗ image 'workstation' absente"; ok=0; fi
 
-✅ Installation terminée.
-Active le groupe docker : déconnecte/reconnecte (ou: reboot), puis :
-  source ~/.bashrc        # (ou ouvre un nouveau terminal)
-  task <repo> <sujet>     # session Claude isolée dans un conteneur
+echo
+if [ "$ok" = 1 ]; then
+  cat <<EOF
+╔══════════════════════════════════════════════╗
+║  ✅  Workstation installée avec succès          ║
+╚══════════════════════════════════════════════╝
 
-Workstation : $WS_DIR   |   Espace de travail : $WS_HOME   |   Tâches : $WS_REPOS
+Emplacements :
+  workstation : $WS_DIR
+  travail     : $WS_HOME
+  tâches      : $WS_REPOS
+
+Commandes 'task' (session Claude isolée dans un conteneur) :
+  task <repo> <sujet>                  → base par défaut ($WS_REPOS)
+  task --here <repo> <sujet>           → base = dossier courant
+  task --at <chemin> <repo> <sujet>    → base = chemin précis
+
+  ex : task claude-autodev fix-login
+
+Dernière étape : active le groupe docker (déconnexion/reconnexion ou 'reboot'),
+puis ouvre un nouveau terminal — 'task' sera disponible.
 EOF
+else
+  echo "⚠ Installation incomplète — voir les ✗ ci-dessus."
+  exit 1
+fi

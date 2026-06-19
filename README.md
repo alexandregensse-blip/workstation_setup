@@ -7,13 +7,17 @@ pour travailler en **sessions isolées**. Aucun chemin absolu machine-spécifiqu
 ## Installation — une commande
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/alexandregensse-blip/workstation_setup/main/install.sh)
+curl -fsSL https://raw.githubusercontent.com/alexandregensse-blip/workstation_setup/main/install.sh | bash
 ```
 
-Le script : élève les droits (`sudo`), installe les paquets, **se clone lui-même dans un dossier caché**
+Le script **te demande où placer ton espace de travail** (dossier courant / `~/dev` / chemin précis),
+élève les droits (`sudo`), installe les paquets, **se clone lui-même dans un dossier caché**
 (`~/.local/share/workstation`), installe uv/Claude/Serena/rtk, déploie tes dotfiles, **construit l'image
 Docker**, et **ajoute le `source` de `task` à ton `.bashrc`** automatiquement. Puis il lance l'auth
-GitHub + Claude (navigateur) — sauf si `GH_TOKEN` / `CLAUDE_CODE_OAUTH_TOKEN` sont en variables d'env.
+GitHub + Claude (navigateur) — sauf si `GH_TOKEN` / `CLAUDE_CODE_OAUTH_TOKEN` sont en variables d'env —
+et **affiche une confirmation** avec les commandes `task`.
+
+> Le prompt et `sudo` lisent sur `/dev/tty`, donc le format pipe (`| bash`) reste interactif.
 
 Après l'install, **active le groupe docker** (déconnexion/reconnexion ou `reboot`), puis ouvre un
 nouveau terminal : `task` est dispo.
