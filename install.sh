@@ -1,69 +1,91 @@
 #!/usr/bin/env bash
-# workstation_setup — bootstrap idempotent pour une machine neuve (Ubuntu).
+# workstation_setup — installeur unique et idempotent (Ubuntu).
 #
-# ORDRE : binaires -> dotfiles fait-main -> setup Serena (MCP + hooks)
-# -> rtk init EN DERNIER (il mute ~/.claude/CLAUDE.md + settings.json par-dessus).
-# Installe aussi Docker + la commande `task` (Pattern C, modèle A : Claude isolé en conteneur).
+# Machine neuve, UNE commande :
+#   bash <(curl -fsSL https://raw.githubusercontent.com/alexandregensse-blip/workstation_setup/main/install.sh)
+#
+# Variables d'environnement surchargeables (toutes optionnelles) :
+#   WORKSTATION_DIR    où vit la workstation       (défaut: $HOME/.local/share/workstation, caché)
+#   WORKSTATION_HOME   ton espace de travail        (défaut: $HOME/dev)
+#   WORKSTATION_REPOS  base des clones de tâches     (défaut: $WORKSTATION_HOME/repos)
+# Aucun chemin absolu machine-spécifique : tout est relatif à $HOME.
 set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export PATH="$HOME/.local/bin:$PATH"
+WS_DIR="${WORKSTATION_DIR:-$HOME/.local/share/workstation}"
+WS_HOME="${WORKSTATION_HOME:-$HOME/dev}"
+WS_REPOS="${WORKSTATION_REPOS:-$WS_HOME/repos}"
+WS_URL="https://github.com/alexandregensse-blip/workstation_setup"
 log(){ printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
+export PATH="$HOME/.local/bin:$PATH"
 
-log "0/10 élévation de droits (sudo)"
-sudo -v   # demande le mot de passe une fois, en début de course
+log "0 · élévation de droits (sudo)"
+sudo -v
 
-log "1/10 paquets système (apt)"
+log "1 · paquets système (apt)"
 sudo apt update
 sudo apt install -y curl git ripgrep gh nodejs npm docker.io
 
-log "2/10 uv"
+# Auto-bootstrap : si on n'est pas déjà dans un clone, récupérer le repo dans le dossier caché.
+_src="${BASH_SOURCE[0]:-}"
+if [ -n "$_src" ] && [ -d "$(dirname "$_src")/claude" ]; then
+  REPO_DIR="$(cd "$(dirname "$_src")" && pwd)"
+else
+  log "récupération de la workstation dans $WS_DIR"
+  if [ -d "$WS_DIR/.git" ]; then git -C "$WS_DIR" pull --ff-only; else git clone "$WS_URL" "$WS_DIR"; fi
+  REPO_DIR="$WS_DIR"
+fi
+
+log "2 · uv"
 command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 
-log "3/10 claude code (installeur natif)"
+log "3 · claude code (installeur natif)"
 command -v claude >/dev/null || curl -fsSL https://claude.ai/install.sh | bash
 
-log "4/10 serena (MCP de code, MIT, license-safe)"
+log "4 · serena (MCP de code, MIT)"
 uv tool install -p 3.13 serena-agent
 serena init
 
-log "5/10 rtk (binaire, pas de Rust)"
+log "5 · rtk (binaire, sans Rust)"
 command -v rtk >/dev/null || curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh
 
-log "6/10 dotfiles fait-main + structure + commande task"
-mkdir -p ~/.claude ~/dev/repos ~/.local/share/workstation
-cp "$REPO_DIR/claude/CLAUDE.md"     ~/.claude/CLAUDE.md   # politique Serena
-cp "$REPO_DIR/claude/CLAUDE.md"     ~/dev/AGENTS.md       # même politique, version cross-tool
-cp "$REPO_DIR/claude/settings.json" ~/.claude/settings.json
-cp "$REPO_DIR/claude/statusline.sh" ~/.claude/statusline.sh
-cp "$REPO_DIR/dev/CLAUDE.md"        ~/dev/CLAUDE.md
-cp "$REPO_DIR/shell/task.sh"        ~/.local/share/workstation/task.sh
-chmod +x ~/.claude/statusline.sh
-grep -q 'workstation/task.sh' ~/.bashrc 2>/dev/null \
-  || echo 'source ~/.local/share/workstation/task.sh' >> ~/.bashrc
+log "6 · dotfiles + espace de travail + commande task (source auto)"
+mkdir -p "$HOME/.claude" "$WS_HOME" "$WS_REPOS" "$HOME/.local/share/workstation-shell"
+cp "$REPO_DIR/claude/CLAUDE.md"     "$HOME/.claude/CLAUDE.md"   # politique Serena
+cp "$REPO_DIR/claude/CLAUDE.md"     "$WS_HOME/AGENTS.md"        # même politique, cross-tool
+cp "$REPO_DIR/claude/settings.json" "$HOME/.claude/settings.json"
+cp "$REPO_DIR/claude/statusline.sh" "$HOME/.claude/statusline.sh"
+cp "$REPO_DIR/dev/CLAUDE.md"        "$WS_HOME/CLAUDE.md"        # convention multi-repo
+cp "$REPO_DIR/shell/task.sh"        "$HOME/.local/share/workstation-shell/task.sh"
+chmod +x "$HOME/.claude/statusline.sh"
+# source automatique de `task` (idempotent) + base par défaut si non standard
+if ! grep -q 'workstation-shell/task.sh' "$HOME/.bashrc" 2>/dev/null; then
+  { [ "$WS_REPOS" != "$HOME/dev/repos" ] && echo "export WORKSTATION_REPOS=\"$WS_REPOS\""
+    echo 'source "$HOME/.local/share/workstation-shell/task.sh"'; } >> "$HOME/.bashrc"
+fi
 
-log "7/10 enregistrement Serena dans Claude Code (MCP + hooks recommandés)"
+log "7 · enregistrement Serena dans Claude Code (MCP)"
 serena setup claude-code
 
-log "8/10 rtk init (DERNIER — ajoute @RTK.md, patche settings.json)"
+log "8 · rtk init (DERNIER — ajoute @RTK.md, patche settings.json)"
 rtk init -g --auto-patch
 
-log "9/10 Docker : autoriser ton user à parler au démon (effet après reconnexion)"
+log "9 · groupe docker pour ton user (effet après reconnexion)"
 sudo usermod -aG docker "$USER"
 
-log "10/10 authentification (zéro-touche si jetons en env, sinon navigateur)"
-gh auth status     >/dev/null 2>&1 || gh auth login        # ou: export GH_TOKEN=...
-claude auth status >/dev/null 2>&1 || claude auth login    # ou: export CLAUDE_CODE_OAUTH_TOKEN=... (claude setup-token 1x)
+log "10 · image docker 'workstation' (via sudo, fenêtre sudo encore ouverte)"
+sudo docker image inspect workstation >/dev/null 2>&1 || sudo docker build -t workstation "$REPO_DIR"
+
+log "11 · authentification (zéro-touche si jetons en env, sinon navigateur)"
+gh auth status     >/dev/null 2>&1 || gh auth login
+claude auth status >/dev/null 2>&1 || claude auth login
 
 cat <<EOF
 
 ✅ Installation terminée.
-Pour activer le groupe docker : déconnecte/reconnecte (ou: newgrp docker), puis construis l'image :
-  docker build -t workstation "$REPO_DIR"
+Active le groupe docker : déconnecte/reconnecte (ou: reboot), puis :
+  source ~/.bashrc        # (ou ouvre un nouveau terminal)
+  task <repo> <sujet>     # session Claude isolée dans un conteneur
 
-Ensuite, pour une session de travail ISOLÉE :
-  task <repo> <sujet>      # clone + branche + Claude dans un conteneur jetable
-
-(Ou en direct sur l'hôte : lance \`claude\` depuis ~/dev.)
+Workstation : $WS_DIR   |   Espace de travail : $WS_HOME   |   Tâches : $WS_REPOS
 EOF

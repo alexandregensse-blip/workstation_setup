@@ -1,63 +1,56 @@
 # workstation_setup
 
-Workstation **portable**. Sur une machine neuve (Ubuntu), **une seule commande** installe tous
-les outils, recrée `~/dev/repos/`, configure Claude Code, et pose Docker + la commande `task`
-pour travailler en **sessions isolées**.
+Workstation **portable**. Sur une machine neuve (Ubuntu), **une seule commande** installe tous les
+outils, configure Claude Code (MCP **Serena** + rtk), prépare Docker, et pose la commande `task`
+pour travailler en **sessions isolées**. Aucun chemin absolu machine-spécifique (tout est relatif à `$HOME`).
 
-## Installation (machine neuve)
-
-Le repo est public → commande unique (aucune auth nécessaire pour récupérer le script) :
+## Installation — une commande
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/alexandregensse-blip/workstation_setup/main/install.sh)
 ```
 
-Le script gère l'élévation de droits (`sudo -v`), installe tout, puis lance l'auth GitHub + Claude
-(via navigateur) — **sauf** si tu fournis `GH_TOKEN` / `CLAUDE_CODE_OAUTH_TOKEN` en variables
-d'environnement (install entièrement automatique alors). `claude setup-token` une fois sur une
-machine donne un jeton long réutilisable.
+Le script : élève les droits (`sudo`), installe les paquets, **se clone lui-même dans un dossier caché**
+(`~/.local/share/workstation`), installe uv/Claude/Serena/rtk, déploie tes dotfiles, **construit l'image
+Docker**, et **ajoute le `source` de `task` à ton `.bashrc`** automatiquement. Puis il lance l'auth
+GitHub + Claude (navigateur) — sauf si `GH_TOKEN` / `CLAUDE_CODE_OAUTH_TOKEN` sont en variables d'env.
 
-Après l'install : déconnecte/reconnecte (pour le groupe `docker`), puis construis l'image une fois :
+Après l'install, **active le groupe docker** (déconnexion/reconnexion ou `reboot`), puis ouvre un
+nouveau terminal : `task` est dispo.
 
-```bash
-docker build -t workstation ~/workstation_setup
-```
+### Choisir les emplacements (optionnel)
 
-## Travailler — deux modes
+Variables d'env, toutes facultatives (défauts entre parenthèses) :
 
-- **Sur l'hôte** (rapide) : `claude` depuis `~/dev`.
-- **En session isolée** (recommandé) : `task <repo> <sujet>` — clone sur l'hôte, crée la branche
-  `task/<slug>`, et lance **Claude dans un conteneur jetable** (toolchain figé, ton clone monté,
-  auth réutilisée depuis tes logins hôte). À la sortie, le conteneur est détruit, le clone reste.
-  Voir `shell/task.sh` et `Dockerfile`.
+| Variable | Rôle | Défaut |
+|---|---|---|
+| `WORKSTATION_DIR`   | où vit la workstation (scripts/Dockerfile) | `~/.local/share/workstation` (caché) |
+| `WORKSTATION_HOME`  | ton espace de travail | `~/dev` |
+| `WORKSTATION_REPOS` | base des clones de tâches | `$WORKSTATION_HOME/repos` |
 
-> Isolation forte : tout ce que fait Claude (bash, édition, Serena) reste dans le conteneur.
-> C'est le **Pattern C / modèle A**. Le côté autodev (agents headless) réutilisera la même image,
-> avec auth par jetons, identité bot dédiée et sandbox renforcé (phase ultérieure).
+Ex. : `WORKSTATION_HOME=~/projets bash <(curl -fsSL …/install.sh)`
 
-## Ce que fait `install.sh` (l'ordre compte)
+## Travailler
 
-Serena et rtk se branchent dans la config Claude via leur propre setup/init (ils modifient
-`~/.claude/CLAUDE.md` et `settings.json`). D'où l'ordre :
+- **Sur l'hôte** : `claude` depuis ton espace de travail.
+- **En session isolée** (recommandé) :
+  ```bash
+  task <repo> <sujet>            # base par défaut (~/dev/repos)
+  task --here <repo> <sujet>     # clone sous le dossier courant
+  task --at /chemin <repo> <sujet>   # clone sous un chemin précis
+  ```
+  → clone sur l'hôte, branche `task/<slug>`, puis **Claude dans un conteneur jetable** (Serena
+  connecté, auth réutilisée). À la sortie : conteneur détruit, clone conservé sur l'hôte.
+  Détails : `shell/task.sh` et `Dockerfile`.
 
-1. `apt` : gh, node, npm, ripgrep, **docker.io**
-2. `uv`
-3. Claude Code (installeur natif)
-4. **Serena** (`uv tool install -p 3.13 serena-agent` + `serena init`) — MCP de code, MIT
-5. `rtk` (binaire, sans Rust)
-6. dotfiles fait-main (politique Serena, `settings.json`, `statusline.sh`, `dev/CLAUDE.md`) +
-   `~/dev/repos` + déploiement de la commande `task`
-7. `serena setup claude-code` → MCP Serena + hooks
-8. `rtk init -g` → **EN DERNIER** (ajoute `@RTK.md`, patche `settings.json`)
-9. groupe `docker` pour ton user
-10. auth GitHub + Claude
-
-Le repo ne stocke **que** le fait-main ; les hooks sont posés par les setup respectifs.
-`~/.claude.json` (secrets/état) n'est **jamais** versionné.
+> Isolation forte (Pattern C / modèle A) : tout ce que fait Claude reste dans le conteneur.
+> Le conteneur réutilise l'utilisateur `ubuntu` (uid 1000) de l'image → les fichiers montés
+> (clone, identifiants) sont accessibles sans souci de permissions.
 
 ## Mise à jour
 
 ```bash
-uv tool upgrade serena-agent            # Serena
-docker build -t workstation ~/workstation_setup   # reconstruire l'image après MAJ d'outils
+git -C ~/.local/share/workstation pull        # récupérer les changements
+uv tool upgrade serena-agent                  # Serena
+docker build -t workstation ~/.local/share/workstation   # reconstruire l'image
 ```
