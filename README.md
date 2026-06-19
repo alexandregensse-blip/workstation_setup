@@ -33,6 +33,17 @@ curl -fsSL .../install.sh | bash -s -- --home ~/dev --yes
 | `--lang`  / `WORKSTATION_LANG`  | Claude UI language | keep host pref, else system default |
 | `--yes` / `-y` | non-interactive (skip the prompt) | — |
 
+## Dependencies
+
+**Prerequisites** (before the one-liner): Debian/Ubuntu, `sudo`, internet, and `bash` + `curl`.
+
+**Installed on the host** by `install.sh` (only what's missing):
+- via `apt`: `curl`, `git`, `ripgrep`, `gh`, `nodejs`, `npm`, `docker.io`, `jq`
+- via their own installers: `uv`, Claude Code, **Serena** (`serena-agent`, through uv), **rtk**
+
+**Inside the Docker image** (Wolfi / `apk`): `bash`, `curl`, `git`, `ripgrep`, `python3`, `gh`, `jq`,
+`shadow`, `ca-certificates`, plus `uv`, Claude Code, Serena, rtk.
+
 ## Work
 
 - **On the host**: `claude` from your workspace.
@@ -51,8 +62,9 @@ curl -fsSL .../install.sh | bash -s -- --home ~/dev --yes
 
 ## Image
 
-Base: **`debian:12-slim`** — glibc (required by the prebuilt binaries: Claude Code, rtk, uv) and much
-smaller than a full Ubuntu image. **Alpine (musl) is avoided**: it breaks glibc prebuilt binaries.
+Base: **Chainguard Wolfi** (`cgr.dev/chainguard/wolfi-base`) — a minimal, **glibc** "undistro"
+(~14 MB base, ~0 CVEs). glibc is required by the prebuilt binaries (Claude Code, rtk, uv);
+**Alpine (musl) is avoided** (it breaks them). Final image ≈ **194 MB**, `dev` user at uid 1000.
 
 ## Update
 
