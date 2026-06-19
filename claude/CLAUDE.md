@@ -1,19 +1,19 @@
-# Politique d'exploration de code (Serena)
+# Code Exploration Policy (Serena)
 
-Pour naviguer et comprendre du code, privilégier les outils sémantiques de **Serena** (MCP) plutôt que de lire des fichiers entiers.
+To navigate and understand code, prefer Serena's semantic tools (MCP) over reading whole files.
 
-**Début de session dans un repo :**
-- Activer le projet : outil `activate_project` (automatique si lancé avec `--project-from-cwd`).
-- Laisser Serena indexer via le Language Server si nécessaire.
+**Start of a session in a repo:**
+- Activate the project: `activate_project` tool (automatic if launched with `--project-from-cwd`).
+- Let Serena index via the language server if needed.
 
-**Trouver / lire du code :**
-- Vue d'ensemble d'un fichier → `get_symbols_overview` avant de l'ouvrir.
-- Un symbole précis (fonction, classe, méthode) → `find_symbol` (par chemin de symbole), au lieu de lire tout le fichier.
-- Qui référence quoi → `find_referencing_symbols`.
-- Recherche par motif texte / regex → `search_for_pattern`.
+**Finding / reading code:**
+- File overview → `get_symbols_overview` before opening it.
+- A specific symbol (function, class, method) → `find_symbol` (by symbol path), instead of reading the whole file.
+- Who references what → `find_referencing_symbols`.
+- Text / regex search → `search_for_pattern`.
 
-**Éditer :**
-- Préférer l'édition symbolique de Serena (`replace_symbol_body`, `insert_after_symbol`, `insert_before_symbol`) — plus sûre et plus économe en tokens que réécrire un fichier entier.
-- `Read` reste autorisé avant un `Edit`/`Write` ponctuel.
+**Editing:**
+- Prefer Serena's symbolic editing (`replace_symbol_body`, `insert_after_symbol`, `insert_before_symbol`) — safer and more token-efficient than rewriting a whole file.
+- `Read` is still allowed before a one-off `Edit`/`Write`.
 
-Serena délègue au Language Server du langage (LSP) pour une analyse sémantique réelle (types, définitions, références). 40+ langages supportés ; pour un langage non couvert, repli sur la recherche texte.
+Serena delegates to the language's LSP server for real semantic analysis (types, definitions, references). 40+ languages supported; for an unsupported language, it falls back to text search.

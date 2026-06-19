@@ -1,36 +1,36 @@
-# ~/dev — convention de travail multi-repo
+# ~/dev — multi-repo working convention
 
-> Complète la politique globale (`~/.claude/CLAUDE.md`, orientée Serena).
-> Ici : gestion multi-repo / multi-session.
+> Complements the global policy (`~/.claude/CLAUDE.md`, Serena-oriented).
+> Here: multi-repo / multi-session handling.
 
-## Principe
-Le local est un cache **JETABLE**. GitHub est la **SEULE** vérité. Tout travail correct est poussé.
-Un dossier de tâche peut être supprimé à tout moment SANS perte si tout est sur le cloud.
+## Principle
+Local is a DISPOSABLE cache. GitHub is the ONLY source of truth. Every correct piece of work is pushed.
+A task folder can be deleted at any time WITHOUT loss as long as everything is on the cloud.
 
-## Quand on me dit « travaille sur <repo>, sujet <B> »
+## When asked "work on <repo>, topic <B>"
 
-1. **Résoudre <repo> via gh** (aucune table à maintenir) :
-   - `<owner/name>` ou URL → utiliser tel quel ;
-   - sinon chercher dans `gh repo list --json nameWithOwner` puis
-     `gh search prs --author=@me --json repository` (dédupliqué) ;
-   - 1 résultat → on prend ; plusieurs → demander lequel ; aucun → demander le lien/nom exact.
+1. **Resolve <repo> via gh** (no table to maintain):
+   - `<owner/name>` or a URL → use as-is;
+   - otherwise search `gh repo list --json nameWithOwner` then
+     `gh search prs --author=@me --json repository` (deduplicated);
+   - 1 match → use it; several → ask which; none → ask for the link / exact name.
 
-2. **Cloner** dans un dossier horodaté :
+2. **Clone** into a timestamped folder:
    ```bash
    ts=$(date +%Y%m%d-%H%M); slug=<kebab-case(B)>
-   gh repo clone <owner/name> ~/dev/repos/<name>/${ts}_${slug}
+   gh repo clone <owner/name> <base>/<name>/${ts}_${slug}
    ```
 
-3. **Brancher** : `cd` dedans → `git switch -c task/<slug>` → `git push -u origin task/<slug>`.
-   Activer le projet dans Serena (`activate_project` / `--project-from-cwd`).
+3. **Branch**: `cd` in → `git switch -c task/<slug>` → `git push -u origin task/<slug>`.
+   Activate the project in Serena (`activate_project` / `--project-from-cwd`).
 
-4. **Travailler**, en poussant à chaque étape terminée et correcte.
+4. **Work**, pushing at every finished and correct step.
 
-5. **Suppression SANS perte** — supprimer UNIQUEMENT si les DEUX sont vrais :
-   - `git status --porcelain` vide (rien de non commité / non suivi de valeur), ET
-   - `git log @{u}..` vide (rien de non poussé).
+5. **Loss-free deletion** — delete ONLY if BOTH are true:
+   - `git status --porcelain` is empty, AND
+   - `git log @{u}..` is empty (nothing unpushed).
 
-   Sinon pousser d'abord. Puis `rm -rf` le dossier (le cache Serena `.serena/` part avec lui ;
-   pas d'index externe à libérer, contrairement à un watcher). La branche **distante RESTE**.
+   Otherwise push first. Then `rm -rf` the folder (Serena's `.serena/` cache goes with it;
+   no external index to release). The remote branch STAYS.
 
-Pas d'auto-push : un crash en cours de tâche → on refait la tâche.
+No auto-push: a crash mid-task → redo the task.
