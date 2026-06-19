@@ -23,9 +23,9 @@ WS_URL="https://github.com/alexandregensse-blip/workstation_setup"
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --home)   WS_HOME="${2/#\~/$HOME}"; shift 2 ;;
-    --repos)  WS_REPOS="${2/#\~/$HOME}"; shift 2 ;;
-    --dir)    WS_DIR="${2/#\~/$HOME}"; shift 2 ;;
+    --home)   WS_HOME="${2:?--home requires a path}";   WS_HOME="${WS_HOME/#\~/$HOME}";   shift 2 ;;
+    --repos)  WS_REPOS="${2:?--repos requires a path}"; WS_REPOS="${WS_REPOS/#\~/$HOME}"; shift 2 ;;
+    --dir)    WS_DIR="${2:?--dir requires a path}";     WS_DIR="${WS_DIR/#\~/$HOME}";     shift 2 ;;
     -y|--yes) ASSUME_YES=1; shift ;;
     *) echo "unknown flag: $1  (use --home / --repos / --dir / --yes)"; exit 1 ;;
   esac
@@ -107,7 +107,7 @@ log "docker image 'workstation' (build if missing)"
 dock image inspect workstation >/dev/null 2>&1 || dock build -t workstation "$REPO_DIR"
 
 log "authentication (env tokens if present, else browser)"
-gh auth status     >/dev/null 2>&1 || gh auth login
+gh auth status     >/dev/null 2>&1 || gh auth login --web --git-protocol https
 claude auth status >/dev/null 2>&1 || claude auth login
 
 log "Check"

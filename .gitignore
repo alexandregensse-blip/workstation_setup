@@ -1,4 +1,10 @@
-# Rien de sensible ne doit entrer dans ce repo.
+# Nothing sensitive should ever land in this repo.
 *.bak
 *.log
 .DS_Store
+
+# Safety net: never commit credentials / secrets.
+.credentials.json
+*.pem
+*.key
+.env

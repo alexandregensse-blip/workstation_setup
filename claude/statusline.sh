@@ -141,8 +141,4 @@ else
     out="$(printf '%s\n%*s%s' "$left" "$pad" "" "$right")"; path="newline"
   fi
 fi
-# DEBUG TEMP
-{ printf 'cols=%s avail=%s lv=%s rv=%s path=%s outlen=%s\n' \
-    "$cols" "$avail" "${lv:-0}" "${rv:-0}" "$path" \
-    "$(vlen "$(printf '%s' "$out" | head -1)")"; } >>/tmp/sl_debug.log 2>&1
 printf '%s' "$out"
