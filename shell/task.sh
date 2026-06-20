@@ -23,8 +23,8 @@ task — isolated Claude sessions in disposable containers.
                                                gh repos (asks if several/none match); [topic] defaults
                                                to a timestamp. Clones under 'running/', branches
                                                task/<slug>, runs Claude in a container.
-  task resume                                  List existing task clones, select some, reopen each in a new
-                                               tab and CONTINUE its Claude conversation (uses fzf if installed).
+  task resume                                  List existing task clones, pick some in a checkbox menu, reopen
+                                               each in a new tab and CONTINUE its Claude conversation.
   task cleanup [-y]                            Delete task clones that are clean AND fully pushed.
                                                Asks per clone; -y / --yes deletes without asking.
                                                Clones with uncommitted or unpushed work are kept.
@@ -64,7 +64,7 @@ _task_newtab(){
   else echo "  no known terminal to open a tab — run it yourself:  $cmd"; return 1; fi
 }
 
-# Interactive checkbox multi-select (used by 'resume' when fzf isn't installed). Arrow keys / j-k
+# Interactive checkbox multi-select (used by 'resume'). Arrow keys / j-k
 # move, Space or Enter toggles the highlighted row, choosing "Confirmer" validates, "Annuler"/q/ESC
 # aborts. UI is drawn on /dev/tty; the picks land in the global array _TASK_PICKED. Returns 1 if
 # nothing was chosen / aborted.
@@ -120,14 +120,9 @@ _task_resume(){
   local -a clones; mapfile -t clones < <(_task_clones)
   [ "${#clones[@]}" -gt 0 ] || { echo "task: no task clones under $b to resume."; return 0; }
   local -a chosen=()
-  if command -v fzf >/dev/null 2>&1; then
-    mapfile -t chosen < <(printf '%s\n' "${clones[@]#"$b"/}" | fzf --multi --prompt='resume (TAB=select, ENTER=open)> ' --height=40%)
-    local i; for i in "${!chosen[@]}"; do chosen[$i]="$b/${chosen[$i]}"; done
-  else
-    local -a rels=(); local c; for c in "${clones[@]}"; do rels+=("${c#"$b"/}"); done
-    _task_menu "${rels[@]}" || { echo "task: cancelled."; return 0; }
-    local r; for r in "${_TASK_PICKED[@]}"; do chosen+=("$b/$r"); done
-  fi
+  local -a rels=(); local c; for c in "${clones[@]}"; do rels+=("${c#"$b"/}"); done
+  _task_menu "${rels[@]}" || { echo "task: cancelled."; return 0; }
+  local r; for r in "${_TASK_PICKED[@]}"; do chosen+=("$b/$r"); done
   [ "${#chosen[@]}" -gt 0 ] || { echo "task: nothing selected."; return 0; }
   local d; for d in "${chosen[@]}"; do echo "→ opening ${d#"$b"/}"; _task_newtab "task open $(printf %q "$d")"; done
 }
