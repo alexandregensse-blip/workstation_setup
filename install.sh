@@ -17,6 +17,7 @@
 #   --repos <path>  (WORKSTATION_REPOS)  tasks base                     [default <home>/repos]
 #   --dir   <path>  (WORKSTATION_DIR)    where the workstation lives    [default <home>/.workstation]
 #   --lang  <code>  (WORKSTATION_LANG)   Claude UI language (image)     [default: unset / Claude default]
+#   --import-prefs | --no-import-prefs   import this machine's Claude prefs (statusline/lang/theme)  [default: ask]
 #   --yes | -y                           non-interactive (skip prompt)
 # Re-running installs/configures only what is missing. No machine-specific absolute paths.
 set -euo pipefail
@@ -25,6 +26,7 @@ WS_HOME="${WORKSTATION_HOME:-}"
 WS_REPOS="${WORKSTATION_REPOS:-}"
 WS_DIR="${WORKSTATION_DIR:-}"
 WS_LANG="${WORKSTATION_LANG:-}"
+IMPORT_PREFS="${WORKSTATION_IMPORT_PREFS:-}"   # ""=ask, 1=yes, 0=no
 ASSUME_YES=0
 WS_URL="https://github.com/alexandregensse-blip/workstation_setup"
 
@@ -34,8 +36,10 @@ while [ $# -gt 0 ]; do
     --repos)  WS_REPOS="${2:?--repos requires a path}"; WS_REPOS="${WS_REPOS/#\~/$HOME}"; shift 2 ;;
     --dir)    WS_DIR="${2:?--dir requires a path}";     WS_DIR="${WS_DIR/#\~/$HOME}";     shift 2 ;;
     --lang)   WS_LANG="${2:?--lang requires a code}";   shift 2 ;;
+    --import-prefs)    IMPORT_PREFS=1; shift ;;
+    --no-import-prefs) IMPORT_PREFS=0; shift ;;
     -y|--yes) ASSUME_YES=1; shift ;;
-    *) echo "unknown flag: $1  (use --home / --repos / --dir / --lang / --yes)"; exit 1 ;;
+    *) echo "unknown flag: $1  (use --home/--repos/--dir/--lang/--import-prefs/--no-import-prefs/--yes)"; exit 1 ;;
   esac
 done
 
@@ -90,6 +94,31 @@ else sudo usermod -aG docker "$USER"; : > "$WS_DIR/.docker-group-added"; group_a
 
 log "docker image 'workstation' (build if missing)"
 dock image inspect workstation >/dev/null 2>&1 || dock build --build-arg "WS_LANG=$WS_LANG" -t workstation "$REPO_DIR"
+
+log "Claude preferences (optional import from this machine — host is only read)"
+mkdir -p "$WS_DIR/.claude"
+if [ -f "$WS_DIR/.claude/settings.json" ]; then echo "  already imported ✓"
+elif [ ! -f "$HOME/.claude/settings.json" ]; then echo "  no local Claude settings found — using image defaults"
+else
+  do_import="$IMPORT_PREFS"
+  if [ -z "$do_import" ]; then
+    if [ "$ASSUME_YES" = 1 ]; then do_import=0
+    elif [ -r /dev/tty ]; then
+      printf '  Import your local Claude preferences (statusline, language, theme…)? [Y/n]: '
+      read -r a < /dev/tty || a=y; case "$a" in n|N|no|NO) do_import=0 ;; *) do_import=1 ;; esac
+    else do_import=0; fi
+  fi
+  if [ "$do_import" = 1 ]; then
+    cp "$HOME/.claude/settings.json" "$WS_DIR/.claude/host-settings.json"
+    [ -f "$HOME/.claude/statusline.sh" ] && cp "$HOME/.claude/statusline.sh" "$WS_DIR/.claude/statusline.sh"
+    # keep OUR Serena/rtk hooks (from the image's committed settings); drop machine-specific keys
+    dock run --rm -v "$WS_DIR:/ws" workstation bash -lc \
+      'jq -s ".[0] + {hooks: .[1].hooks} | del(.permissions, .enabledPlugins)" /ws/.claude/host-settings.json /ws/claude/settings.json > /ws/.claude/settings.json.tmp && mv /ws/.claude/settings.json.tmp /ws/.claude/settings.json' \
+      && echo "  imported ✓ (workstation hooks kept; host permissions/plugins not imported)" \
+      || echo "  import failed — using image defaults"
+    rm -f "$WS_DIR/.claude/host-settings.json"
+  else echo "  skipped — using image defaults"; fi
+fi
 
 log "task command (auto-sourced in ~/.bashrc, removable block)"
 if ! grep -q '# >>> workstation >>>' "$HOME/.bashrc" 2>/dev/null; then

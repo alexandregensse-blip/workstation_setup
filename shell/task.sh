@@ -80,11 +80,17 @@ task() {
   gh repo clone "$repo" "$dir" || return 1
   ( cd "$dir" && git switch -c "task/$slug" && git push -u origin "task/$slug" )
 
+  # optional per-machine config overrides (imported prefs / statusline), mounted over the baked ones
+  local -a cfg_mounts=()
+  [ -f "$ws_dir/.claude/settings.json" ] && cfg_mounts+=(-v "$ws_dir/.claude/settings.json:/home/dev/.claude/settings.json:ro")
+  [ -f "$ws_dir/.claude/statusline.sh" ]  && cfg_mounts+=(-v "$ws_dir/.claude/statusline.sh:/home/dev/.claude/statusline.sh:ro")
+
   $dock run -it --rm \
     --name "task-$slug" \
     -v "$dir:/work" -w /work \
     -e GH_TOKEN="$gh_token" \
     "${claude_auth[@]}" \
+    "${cfg_mounts[@]}" \
     --memory=4g --cpus=2 \
     workstation claude
 

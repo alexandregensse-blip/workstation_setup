@@ -68,6 +68,7 @@ The prompt and `sudo` read from `/dev/tty`, so the pipe form stays interactive.
 | `--repos <path>` | `WORKSTATION_REPOS` | tasks base | `<home>/repos` |
 | `--dir <path>`   | `WORKSTATION_DIR`   | where the workstation lives | `<home>/.workstation` |
 | `--lang <code>`  | `WORKSTATION_LANG`  | Claude UI language (baked in the image) | unset (Claude default) |
+| `--import-prefs` / `--no-import-prefs` | `WORKSTATION_IMPORT_PREFS` | import this machine's Claude prefs (statusline/lang/theme) | ask if a local Claude is found |
 | `--yes` / `-y`   | —                   | non-interactive (skip prompt) | — |
 
 Missing flag values fail fast with a clear message (guarded against `set -u`).

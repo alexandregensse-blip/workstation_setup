@@ -33,6 +33,7 @@ curl -fsSL .../install.sh | bash -s -- --home ~/dev --yes
 | `--repos` / `WORKSTATION_REPOS` | tasks base | `<home>/repos` |
 | `--dir`   / `WORKSTATION_DIR`   | where the workstation lives | `<home>/.workstation` |
 | `--lang`  / `WORKSTATION_LANG`  | Claude UI language (baked in the image) | unset (Claude default) |
+| `--import-prefs` / `--no-import-prefs` | import this machine's Claude prefs (statusline/lang/theme) | ask if a local Claude is found |
 | `--yes` / `-y` | non-interactive (skip the prompt) | — |
 
 ## Dependencies
@@ -73,6 +74,14 @@ connected, auth mounted). On exit: container destroyed, clone kept on the host.
   open — the browser can't auto-open from a container). Either way the credentials are stored in
   `<workspace>/.workstation/.claude/.credentials.json` and mounted read-only into task containers.
   Headless: set `CLAUDE_CODE_OAUTH_TOKEN` instead.
+
+## Preferences
+
+If a Claude install is found on the machine, install offers to **import your local preferences**
+(statusline, language, theme, …). It merges them with the workstation's own Serena/rtk hooks
+(host `permissions`/`enabledPlugins` are dropped) into `<workspace>/.workstation/.claude/` and
+mounts them read-only into task containers — the host `~/.claude` is only read. Force with
+`--import-prefs` / `--no-import-prefs`.
 
 ## Image
 
