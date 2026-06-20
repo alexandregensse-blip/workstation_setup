@@ -2,7 +2,7 @@
 #
 #   task [--here | --at <path>] <repo> [topic]   start: repo fuzzy-matched to your gh repos
 #                                                (asks if ambiguous/none); topic → timestamp if omitted.
-#   task resume                                  pick existing task clones, reopen each in a new terminal tab.
+#   task resume                                  reopen task clones in new tabs, CONTINUING the Claude session.
 #   task cleanup [-y]                            delete clones that are clean AND fully pushed (asks; -y skips).
 #   task auth                                    (re)login to Claude (stored in <workspace>/.workstation/.claude).
 #   task help                                    this help (also shown for: task, task -h/--help/?).
@@ -23,8 +23,8 @@ task — isolated Claude sessions in disposable containers.
                                                gh repos (asks if several/none match); [topic] defaults
                                                to a timestamp. Clones under 'running/', branches
                                                task/<slug>, runs Claude in a container.
-  task resume                                  List existing task clones, select some, reopen each in
-                                               a new terminal tab (uses fzf if installed, else numbers).
+  task resume                                  List existing task clones, select some, reopen each in a new
+                                               tab and CONTINUE its Claude conversation (uses fzf if installed).
   task cleanup [-y]                            Delete task clones that are clean AND fully pushed.
                                                Asks per clone; -y / --yes deletes without asking.
                                                Clones with uncommitted or unpushed work are kept.
@@ -136,7 +136,7 @@ _task_settings(){
 
 # Run the container for an existing clone dir (auth + mounts + docker run). Used by start and 'open'.
 _task_run(){
-  local dir="$1" slug="$2"
+  local dir="$1" slug="$2" resume="${3:-}"
   [ -d "$dir" ] || { echo "task: no clone at $dir"; return 1; }
   local ws_dir dock; ws_dir="$(_task_wsdir)"; dock="$(_task_dock)"
 
@@ -169,6 +169,8 @@ _task_run(){
     cfg="$HOME/.claude.json"; [ -f "$cfg" ] || printf "{}" > "$cfg"
     [ -f /seed/claude-keys.json ] && { jq -s ".[0] * .[1]" "$cfg" /seed/claude-keys.json > /tmp/c1 2>/dev/null && mv /tmp/c1 "$cfg"; }
     jq ".projects[\"/work\"] += {hasTrustDialogAccepted:true, hasCompletedProjectOnboarding:true}" "$cfg" > /tmp/c2 2>/dev/null && mv /tmp/c2 "$cfg"
+    # resume the previous conversation when asked (task resume/open) AND a persisted history exists for /work
+    [ "${WS_RESUME:-0}" = 1 ] && compgen -G "$HOME/.claude/projects/*/*.jsonl" >/dev/null 2>&1 && set -- --continue "$@"
     exec claude "$@"' _ "${cflags[@]}")
 
   # git identity for in-container commits (attribution only — no secret), from host git
@@ -189,6 +191,15 @@ _task_run(){
   # own DNS is flaky, e.g. a phone hotspot). Default: inherit the host resolver.
   local -a dns=() d; for d in ${WORKSTATION_DNS:-}; do dns+=(--dns "$d"); done
 
+  # Persist Claude's conversation history on the HOST so a task survives its disposable (--rm)
+  # container and can be resumed. Kept per-clone INSIDE .git/ so it never shows up in the worktree
+  # and is removed automatically when the clone is (cleanup/uninstall). mkdir first so the bind
+  # source is owned by the host user (uid 1000 = the image's 'dev'), not root-created by docker.
+  local proj="$dir/.git/claude-projects"; mkdir -p "$proj"
+  local -a session=(-v "$proj:/home/dev/.claude/projects")
+  # task resume/open set WS_RESUME=1 → the in-container wrapper runs 'claude --continue' (see claude_cmd).
+  local -a resume_env=(); [ -n "$resume" ] && resume_env=(-e WS_RESUME=1)
+
   $dock run -it --rm \
     --name "task-$slug" \
     -v "$dir:/work" -w /work \
@@ -198,6 +209,8 @@ _task_run(){
     "${gitenv[@]}" \
     "${audio[@]}" \
     "${dns[@]}" \
+    "${session[@]}" \
+    "${resume_env[@]}" \
     --memory=4g --cpus=2 \
     workstation "${claude_cmd[@]}"
 
@@ -211,7 +224,7 @@ task() {
     resume)   _task_resume; return $? ;;
     cleanup)  shift; _task_cleanup "$@"; return $? ;;
     settings) _task_settings; return $? ;;
-    open)    [ -n "${2:-}" ] || { echo "usage: task open <clone-dir>"; return 1; }; _task_run "$2" "$(basename "$2")"; return $? ;;
+    open)    [ -n "${2:-}" ] || { echo "usage: task open <clone-dir>"; return 1; }; _task_run "$2" "$(basename "$2")" resume; return $? ;;
     auth)
       local ws_dir dock; ws_dir="$(_task_wsdir)"; dock="$(_task_dock)"
       mkdir -p "$ws_dir/.claude"
