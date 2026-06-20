@@ -199,6 +199,13 @@ network with flaky DNS, `WORKSTATION_DNS="1.1.1.1 8.8.8.8"` makes `task` pass th
   read, never modified); (2) else a login **inside a container** (`task auth`), which prints a URL
   to open — the browser can't auto-open from inside a container; (3) else `CLAUDE_CODE_OAUTH_TOKEN`
   (generate once with `claude setup-token`). The host `~/.claude` is never written.
+- **Token freshness.** The stored copy is a snapshot; the host login keeps refreshing its OAuth
+  access token, so the copy goes stale and tasks fail with `Please run /login` / `401`. A task
+  container **cannot self-heal**: Claude rewrites `.credentials.json` by atomic rename, which a
+  single-file bind mount rejects (`Device or resource busy`). So `_task_run` **re-syncs the copy
+  from the host login whenever the host file is newer** (still read-only on the host — we copy *from*
+  it), and `task auth` offers the same when its copy is missing or older. Opt out with
+  `WORKSTATION_CLAUDE_NOSYNC=1` (tasks then keep their own independent `task auth` credential).
 - **Browser login can't be fully automated** (the "Authorize" click is the security boundary);
   the CLI prints a URL/code and zero-interaction is only possible with a pre-provisioned token.
 - **Docker group**: `usermod -aG docker` only takes effect on next login. Because `sg`/`newgrp`

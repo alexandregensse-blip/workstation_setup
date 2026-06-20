@@ -202,6 +202,17 @@ _task_run(){
   [ -z "$gh_token" ] && { echo "task: not logged into GitHub — run 'gh auth login' first."; return 1; }
 
   local creds="$ws_dir/.claude/.credentials.json"; local -a claude_auth
+  # Keep the task credential fresh. The host's Claude continuously refreshes its OAuth access token,
+  # but our copy under .workstation/.claude is a snapshot taken at install/auth time — it goes stale
+  # and tasks then fail with "Please run /login · API Error: 401". The container can't self-heal:
+  # Claude rewrites .credentials.json by atomic rename, which a single-file bind mount forbids
+  # ("Device or resource busy"). So we re-sync from the host login (read-only on the host: we copy
+  # FROM ~/.claude, never write to it) whenever it's newer. Opt out with WORKSTATION_CLAUDE_NOSYNC=1
+  # (e.g. if tasks should keep their own separate 'task auth' account).
+  local host_creds="$HOME/.claude/.credentials.json"
+  if [ -z "${WORKSTATION_CLAUDE_NOSYNC:-}" ] && [ -f "$host_creds" ] && [ "$host_creds" -nt "$creds" ]; then
+    mkdir -p "$ws_dir/.claude" && cp "$host_creds" "$creds" && chmod 600 "$creds"
+  fi
   if [ -f "$creds" ]; then claude_auth=(-v "$creds:/home/dev/.claude/.credentials.json:ro")
   elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then claude_auth=(-e CLAUDE_CODE_OAUTH_TOKEN)
   else echo "task: no Claude credentials — run 'task auth' (or set CLAUDE_CODE_OAUTH_TOKEN)."; return 1; fi
@@ -287,7 +298,11 @@ task() {
     auth)
       local ws_dir dock; ws_dir="$(_task_wsdir)"; dock="$(_task_dock)"
       mkdir -p "$ws_dir/.claude"
-      if [ -f "$HOME/.claude/.credentials.json" ] && [ ! -f "$ws_dir/.claude/.credentials.json" ]; then
+      # Offer to (re)use the host login when it exists AND our copy is missing or older than it
+      # (a stale snapshot — the cause of "Please run /login" in tasks). _task_run also re-syncs
+      # automatically on every task start; this is the explicit, interactive path.
+      if [ -f "$HOME/.claude/.credentials.json" ] && \
+         { [ ! -f "$ws_dir/.claude/.credentials.json" ] || [ "$HOME/.claude/.credentials.json" -nt "$ws_dir/.claude/.credentials.json" ]; }; then
         local acct a
         acct="$(grep -oE '"emailAddress"[[:space:]]*:[[:space:]]*"[^"]+"' "$HOME/.claude.json" 2>/dev/null | head -1 | sed -E 's/.*"([^"]+)"$/\1/')"
         [ -z "$acct" ] && acct="unknown account"

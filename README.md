@@ -106,6 +106,12 @@ export WORKSTATION_CLAUDE_EFFORT=high    # --effort: low | medium | high | xhigh
   open — the browser can't auto-open from a container). Either way the credentials are stored in
   `<workspace>/.workstation/.claude/.credentials.json` and mounted read-only into task containers.
   Headless: set `CLAUDE_CODE_OAUTH_TOKEN` instead.
+- **Kept fresh automatically** — that stored copy is a snapshot, while your host login keeps
+  refreshing its OAuth token; a stale copy makes tasks fail with **`Please run /login` / `401`**.
+  So every `task` start **re-syncs the credentials from your host login when it's newer** (the host
+  `~/.claude` is only *read*). Set `WORKSTATION_CLAUDE_NOSYNC=1` to opt out (e.g. if tasks should
+  keep their own separate `task auth` account). A container can't self-heal its own token — Claude
+  rewrites the file by atomic rename, which a single-file mount disallows — hence the host re-sync.
 
 ## Preferences
 
