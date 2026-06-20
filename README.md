@@ -11,7 +11,7 @@ installed if missing). No machine-specific absolute paths.
 ## Install — one command
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/alexandregensse-blip/workstation_setup/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/alexandregensse-blip/workstation_setup/main/install.sh | bash && source ~/.bashrc
 ```
 
 It asks where to put your workspace (current dir / `~/dev` / custom), installs **only the missing**
@@ -19,12 +19,9 @@ host prerequisites (`docker`, `git`, `gh`), clones itself into `<workspace>/.wor
 the Docker image** (which bakes Claude/Serena/rtk + hooks + your dotfiles), adds `task` to your
 `.bashrc`, runs GitHub + Claude auth, and prints a confirmation.
 
-**After install, load `task` into your shell** — a piped installer can't do it for you (it runs in a
-child process):
-
-```bash
-source ~/.bashrc      # …or just open a new terminal
-```
+The trailing **`&& source ~/.bashrc`** runs in your *current* shell (it's not part of the pipe), so
+`task` is available immediately. If you drop it, run `source ~/.bashrc` (or open a new terminal)
+afterward — a piped installer runs in a child process and can't load a shell function into its parent.
 
 > The prompt and `sudo` read from `/dev/tty`, so the pipe form stays interactive.
 
