@@ -81,15 +81,30 @@ ck_set(){                                    # ck_set <idx> <state> [detail]
     done)  [ -n "${CK_DETAIL[$1]:-}" ] && echo "  ${CK_DETAIL[$1]}" ;;
   esac; fi
 }
-# docker build whose live progress (current Dockerfile step + elapsed) updates checklist line <idx>.
+human_rate(){  # bytes/sec → human-readable
+  local b="$1"
+  if   [ "$b" -ge 1048576 ]; then awk -v b="$b" 'BEGIN{printf "%.1f MB/s", b/1048576}'
+  elif [ "$b" -ge 1024    ]; then echo "$((b/1024)) KB/s"
+  else echo "${b} B/s"; fi
+}
+# docker build whose checklist line <idx> shows the current Dockerfile step, the live host
+# download rate (most of it is the build's downloads), and elapsed seconds.
 build_phase(){
   local idx="$1"; shift
   if [ "$CK_TTY" != 1 ] || ! docker info >/dev/null 2>&1; then ck_dirty; dock build "$@"; return $?; fi
-  local logf t0 cur pid rc=0; logf="$(mktemp)"; t0=$SECONDS
+  local logf t0 cur pid rc=0 iface rxf rx0 rx1 rate det
+  logf="$(mktemp)"; t0=$SECONDS
+  iface="$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'dev \K\S+' || true)"
+  rxf="/sys/class/net/$iface/statistics/rx_bytes"
+  rx0="$(cat "$rxf" 2>/dev/null || echo 0)"
   docker build "$@" >"$logf" 2>&1 & pid=$!
   while kill -0 "$pid" 2>/dev/null; do
+    sleep 1
+    rx1="$(cat "$rxf" 2>/dev/null || echo 0)"; rate=$(( rx1 - rx0 )); [ "$rate" -lt 0 ] && rate=0; rx0="$rx1"
     cur="$(grep -aoE '^Step [0-9]+/[0-9]+' "$logf" 2>/dev/null | tail -1)"
-    ck_set "$idx" doing "${cur:-building} ($((SECONDS-t0))s)"; sleep 1
+    if [ -r "$rxf" ]; then det="${cur:-building} · ↓ $(human_rate "$rate") · $((SECONDS-t0))s"
+    else det="${cur:-building} · $((SECONDS-t0))s"; fi
+    ck_set "$idx" doing "$det"
   done
   wait "$pid" || rc=$?
   [ "$rc" != 0 ] && { ck_dirty; echo "  build FAILED (exit $rc) — last lines:"; tail -25 "$logf"; }
