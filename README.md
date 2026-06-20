@@ -56,10 +56,13 @@ else: no Claude/Serena/rtk/uv, no `~/.claude`.
 ## Work
 
 ```bash
-task [repo] [topic]              # repo: prompted (known repos) if omitted; topic: defaults to a timestamp
-task --here [repo] [topic]       # base = current directory
-task --at /path [repo] [topic]   # base = given path
+task <repo> [topic]              # start: repo fuzzy-matched to your gh repos; topic → timestamp if omitted
+task --here <repo> [topic]       # base = current directory
+task --at /path <repo> [topic]   # base = given path
+task resume                      # reopen existing task clones — pick some, each in a new terminal tab
+task cleanup [-y]                # delete clones that are clean AND fully pushed (asks; -y skips the prompt)
 task auth                        # (re)login to Claude (stored in .workstation/.claude)
+task help                        # full help (also shown for: task with no args)
 ```
 
 Clones on the host (under `running/`), branches `task/<slug>`, then runs Claude in a **disposable
