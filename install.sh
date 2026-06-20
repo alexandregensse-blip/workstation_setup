@@ -6,9 +6,11 @@
 # The host gets just: docker + git + gh (installed only if missing, and recorded so
 # uninstall.sh can offer to remove exactly those), plus the `task` command in ~/.bashrc.
 #
+# Flow: it asks ALL its questions up front (workspace, plugins, prefs, auth), then the
+# heavy work (image build + finalize) runs straight through with a live checklist.
+#
 # New machine, ONE command:
 #   curl -fsSL https://raw.githubusercontent.com/alexandregensse-blip/workstation_setup/main/install.sh | bash
-#
 # Headless / scripted (no prompt):
 #   curl -fsSL .../install.sh | bash -s -- --home ~/dev --yes
 #
@@ -19,8 +21,7 @@
 #   --lang  <code>  (WORKSTATION_LANG)   Claude UI language (image)     [default: unset / Claude default]
 #   --import-prefs | --no-import-prefs   import this machine's Claude prefs (statusline/lang/theme)  [default: ask]
 #   --plug-ins <list> (WORKSTATION_PLUGINS) opt-in plugins, comma-separated keys (see plugins/available)  [default: prompt]
-#   --yes | -y                           non-interactive (skip prompt)
-# Re-running installs/configures only what is missing. No machine-specific absolute paths.
+#   --yes | -y                           non-interactive (skip prompts)
 set -euo pipefail
 
 WS_HOME="${WORKSTATION_HOME:-}"
@@ -46,18 +47,15 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+log(){  printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
 have(){ command -v "$1" >/dev/null 2>&1; }
-# docker that works WITH or WITHOUT the docker group (auto-falls back to sudo)
 dock(){ if docker info >/dev/null 2>&1; then docker "$@"; else sudo docker "$@"; fi; }
-# fixed-width box, padded by character count (UTF-8) so the right edge never overflows
 banner(){ local msg="  ✓  $1" w=46 line='' pad; while [ "${#line}" -lt "$w" ]; do line+='═'; done
   pad=$(( w - ${#msg} )); [ "$pad" -lt 0 ] && pad=0
   printf '╔%s╗\n║%s%*s║\n╚%s╝\n' "$line" "$msg" "$pad" '' "$line"; }
 
-# ---- live checklist: a todo list that updates in place; degrades to plain logs without a TTY ----
-CK_NAMES=("Host prerequisites" "Fetch workstation" "Docker group" "Plugins"
-          "Build base image" "Build workstation image" "Import preferences"
-          "task command" "GitHub auth" "Claude login")
+# ---- live checklist for the build phase: a todo list that updates in place (plain logs if no TTY) ----
+CK_NAMES=("Build base image" "Build workstation image" "Import preferences" "task command" "Claude login")
 CK_STATE=(); CK_DETAIL=(); for _ in "${CK_NAMES[@]}"; do CK_STATE+=(todo); CK_DETAIL+=(""); done
 CK_DRAWN=0; CK_TTY=0; [ -t 1 ] && CK_TTY=1
 ck_icon(){ case "$1" in done) printf '\033[32m✓\033[0m';; doing) printf '\033[1;36m▶\033[0m';; *) printf '\033[2m◦\033[0m';; esac; }
@@ -72,24 +70,19 @@ ck_render(){
   done
   CK_DRAWN=${#CK_NAMES[@]}
 }
-ck_dirty(){ CK_DRAWN=0; }                    # call before printing other output (prompt/build)
-ck_set(){                                    # ck_set <idx> <state> [detail]
-  CK_STATE[$1]="$2"; [ $# -ge 3 ] && CK_DETAIL[$1]="$3"
+ck_dirty(){ CK_DRAWN=0; }
+ck_set(){ CK_STATE[$1]="$2"; [ $# -ge 3 ] && CK_DETAIL[$1]="$3"
   if [ "$CK_TTY" = 1 ]; then ck_render
-  else case "$2" in
-    doing) printf '\n\033[1;36m== %s ==\033[0m\n' "${CK_NAMES[$1]}" ;;
-    done)  [ -n "${CK_DETAIL[$1]:-}" ] && echo "  ${CK_DETAIL[$1]}" ;;
-  esac; fi
-}
-human_rate(){ local b="$1"   # bytes/sec → human-readable
+  else case "$2" in doing) printf '  ▶ %s\n' "${CK_NAMES[$1]}";; done) echo "    ✓ ${CK_DETAIL[$1]:-}";; esac; fi; }
+
+human_rate(){ local b="$1"
   if   [ "$b" -ge 1048576 ]; then awk -v b="$b" 'BEGIN{printf "%.1f MB/s", b/1048576}'
   elif [ "$b" -ge 1024    ]; then echo "$((b/1024)) KB/s"; else echo "${b} B/s"; fi; }
-human_size(){ local b="$1"   # bytes → human-readable
+human_size(){ local b="$1"
   if   [ "$b" -ge 1048576 ]; then awk -v b="$b" 'BEGIN{printf "%.0f MB", b/1048576}'
   elif [ "$b" -ge 1024    ]; then echo "$((b/1024)) KB"; else echo "${b} B"; fi; }
 # docker build whose checklist line <idx> shows: current Dockerfile step, downloaded-so-far vs an
-# estimated total (<est> MB, ~ because the downloads are silent), live rate, and elapsed seconds.
-# 'downloaded' is the host's rx delta (mostly the build's traffic) — approximate.
+# estimated total (<est> MB, ~), live rate, elapsed seconds. 'downloaded' = host rx delta (approx).
 build_phase(){
   local idx="$1" est="$2"; shift 2
   if [ "$CK_TTY" != 1 ] || ! docker info >/dev/null 2>&1; then ck_dirty; dock build "$@"; return $?; fi
@@ -116,13 +109,12 @@ build_phase(){
   rm -f "$logf"; return "$rc"
 }
 
-# Workspace location: flag/env, else prompt, else default. The .workstation dir lives inside it.
+# ===== Workspace =====
 if [ -z "$WS_HOME" ]; then
   if [ "$ASSUME_YES" = 0 ] && [ -r /dev/tty ]; then
     printf '\nWhere do you want your workspace (task clones + the .workstation dir)?\n'
     printf '  1) %s   (default)\n  2) current directory: %s\n  3) another path\n' "$HOME/dev" "$PWD"
-    printf 'Choice [1/2/3]: '
-    read -r _ch < /dev/tty || _ch=1
+    printf 'Choice [1/2/3]: '; read -r _ch < /dev/tty || _ch=1
     case "$_ch" in
       2) WS_HOME="$PWD" ;;
       3) printf 'Path: '; read -r WS_HOME < /dev/tty; WS_HOME="${WS_HOME/#\~/$HOME}" ;;
@@ -133,141 +125,129 @@ fi
 WS_DIR="${WS_DIR:-$WS_HOME/.workstation}"
 WS_RUNNING="${WS_RUNNING:-$WS_HOME/running}"
 
-printf '\n\033[1;36m== sudo (cached for the rest of the install) ==\033[0m\n'
+log "sudo (cached for the rest of the install)"
 sudo -v
 
-echo; ck_render   # draw the full checklist (all todo) once
-
-# 1. host prerequisites
-ck_set 0 doing
+# ===== Quick host work needed before the questions (prereqs give us gh; clone gives plugins list) =====
+log "host prerequisites: docker, git, gh (install only what's missing)"
 need=""
 for pair in docker.io:docker git:git gh:gh; do have "${pair#*:}" || need="$need ${pair%:*}"; done
 mkdir -p "$WS_HOME" "$WS_RUNNING"
-if [ -n "$need" ]; then ck_dirty; sudo apt update && sudo apt install -y $need; ck_set 0 done "installed:$need"
-else ck_set 0 done "all present"; fi
+if [ -n "$need" ]; then sudo apt update && sudo apt install -y $need; else echo "  all present ✓"; fi
 
-# 2. fetch the workstation clone (self-contained, inside the workspace)
-ck_set 1 doing
-if [ -d "$WS_DIR/.git" ]; then git -C "$WS_DIR" pull --ff-only >/dev/null 2>&1 || true; _f="updated"
-else
-  if ! git clone "$WS_URL" "$WS_DIR" >/dev/null 2>&1; then ck_dirty; echo "  clone failed:"; git clone "$WS_URL" "$WS_DIR"; fi
-  _f="cloned"
-fi
+log "fetch workstation into $WS_DIR"
+if [ -d "$WS_DIR/.git" ]; then git -C "$WS_DIR" pull --ff-only || true; echo "  updated ✓"
+else git clone "$WS_URL" "$WS_DIR" && echo "  cloned ✓"; fi
 REPO_DIR="$WS_DIR"
 [ -n "$need" ] && printf '%s\n' $need >> "$WS_DIR/.apt-installed"
-ck_set 1 done "$_f → $WS_DIR"
 
-# 3. docker group
-ck_set 2 doing
+log "docker group"
 group_added=0
-if getent group docker | grep -qw "$(id -un)"; then ck_set 2 done "already a member"
-else sudo usermod -aG docker "$USER"; : > "$WS_DIR/.docker-group-added"; group_added=1; ck_set 2 done "added (re-login to drop sudo)"; fi
+if getent group docker | grep -qw "$(id -un)"; then echo "  already a member ✓"
+else sudo usermod -aG docker "$USER"; : > "$WS_DIR/.docker-group-added"; group_added=1; echo "  added (re-login to drop the sudo prompt) ✓"; fi
 
-# 4. plugins (opt-in)
-ck_set 3 doing
+# ===== ALL THE QUESTIONS, up front =====
+log "setup — a few questions, then it builds on its own"
+
+# plugins
 if [ -z "$WS_PLUGINS" ] && [ "$ASSUME_YES" = 0 ] && [ -r /dev/tty ] && [ -f "$REPO_DIR/plugins/available" ]; then
-  ck_dirty; sel=""
+  sel=""
   while IFS=$'\t' read -r pkey pdesc; do
     case "$pkey" in ''|'#'*) continue ;; esac
-    printf '  Enable "%s" — %s? [y/N]: ' "$pkey" "$pdesc"
+    printf '  Enable plugin "%s" — %s? [y/N]: ' "$pkey" "$pdesc"
     read -r a < /dev/tty || a=n; case "$a" in y|Y|yes|YES) sel="$sel $pkey" ;; esac
   done < "$REPO_DIR/plugins/available"
   WS_PLUGINS="$sel"
 fi
 WS_PLUGINS="$(printf '%s' "$WS_PLUGINS" | tr ',' ' ' | tr -s ' ' | sed 's/^ *//;s/ *$//')"
-ck_set 3 done "${WS_PLUGINS:-none}"
+echo "  → plugins: ${WS_PLUGINS:-none}"
 
-# 5. base image (toolchain — built once, then reused)
-ck_set 4 doing
-if dock image inspect workstation-base >/dev/null 2>&1; then ck_set 4 done "present (no re-download)"
-else build_phase 4 180 -f "$REPO_DIR/Dockerfile.base" -t workstation-base "$REPO_DIR" || { echo "⚠ base build failed — see above."; exit 1; }
-     ck_set 4 done "built"; fi
+# import prefs decision (the actual import happens after the build, which has jq)
+if [ -z "$IMPORT_PREFS" ]; then
+  if [ "$ASSUME_YES" = 1 ] || [ ! -f "$HOME/.claude/settings.json" ]; then IMPORT_PREFS=0
+  elif [ -r /dev/tty ]; then printf '  Import your local Claude + gh preferences (statusline, language, theme, gh config)? [Y/n]: '
+    read -r a < /dev/tty || a=y; case "$a" in n|N|no|NO) IMPORT_PREFS=0 ;; *) IMPORT_PREFS=1 ;; esac
+  else IMPORT_PREFS=0; fi
+fi
+echo "  → import prefs: $([ "$IMPORT_PREFS" = 1 ] && echo yes || echo no)"
 
-# 6. workstation image (config + plugins, on top of the base)
-ck_set 5 doing
+# GitHub auth (gh is installed now)
+if gh auth status >/dev/null 2>&1; then echo "  → GitHub: already authenticated"
+elif [ -r /dev/tty ]; then echo "  GitHub login (a browser/code flow follows):"; gh auth login --web --git-protocol https < /dev/tty || true
+else echo "  → GitHub: no TTY — run 'gh auth login' later"; fi
+
+# Claude credentials: reuse decision now (cp needs no image); browser login (no-reuse) is deferred to after the build
+mkdir -p "$WS_DIR/.claude"
+NEED_LOGIN=0; CLAUDE_NOTE=""
+if [ -f "$WS_DIR/.claude/.credentials.json" ]; then CLAUDE_NOTE="already present"
+elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then CLAUDE_NOTE="using CLAUDE_CODE_OAUTH_TOKEN"
+elif [ -f "$HOME/.claude/.credentials.json" ]; then
+  acct="$(grep -oE '"emailAddress"[[:space:]]*:[[:space:]]*"[^"]+"' "$HOME/.claude.json" 2>/dev/null | head -1 | sed -E 's/.*"([^"]+)"$/\1/')"
+  [ -z "$acct" ] && acct="unknown account"
+  if [ "$ASSUME_YES" = 1 ]; then ans=y
+  elif [ -r /dev/tty ]; then printf '  Reuse the Claude login on this machine (account: %s)? [Y/n]: ' "$acct"; read -r ans < /dev/tty || ans=y
+  else ans=y; fi
+  case "${ans:-y}" in
+    n|N|no|NO) NEED_LOGIN=1; CLAUDE_NOTE="will log in after the build" ;;
+    *) cp "$HOME/.claude/.credentials.json" "$WS_DIR/.claude/.credentials.json"; chmod 600 "$WS_DIR/.claude/.credentials.json"; CLAUDE_NOTE="reused host login ($acct)" ;;
+  esac
+else NEED_LOGIN=1; CLAUDE_NOTE="will log in after the build"; fi
+echo "  → Claude: $CLAUDE_NOTE"
+
+# ===== Execution — runs straight through (live checklist) =====
+printf '\n\033[1;36m== building (no more questions) ==\033[0m\n\n'; ck_render
+
+# 0. base image (toolchain — built once, then reused)
+ck_set 0 doing
+if dock image inspect workstation-base >/dev/null 2>&1; then ck_set 0 done "present (no re-download)"
+else build_phase 0 180 -f "$REPO_DIR/Dockerfile.base" -t workstation-base "$REPO_DIR" || { echo "⚠ base build failed — see above."; exit 1; }
+     ck_set 0 done "built"; fi
+
+# 1. workstation image (config + plugins, on top of the base)
+ck_set 1 doing
 prev_plugins="$(cat "$WS_DIR/.plugins" 2>/dev/null || true)"
 if ! dock image inspect workstation >/dev/null 2>&1 || [ "$WS_PLUGINS" != "$prev_plugins" ]; then
-  build_phase 5 0 --build-arg "WS_LANG=$WS_LANG" --build-arg "WS_PLUGINS=$WS_PLUGINS" -t workstation "$REPO_DIR" || { echo "⚠ image build failed — see above."; exit 1; }
-  printf '%s' "$WS_PLUGINS" > "$WS_DIR/.plugins"; ck_set 5 done "built"
-else ck_set 5 done "up to date"; fi
+  build_phase 1 0 --build-arg "WS_LANG=$WS_LANG" --build-arg "WS_PLUGINS=$WS_PLUGINS" -t workstation "$REPO_DIR" || { echo "⚠ image build failed — see above."; exit 1; }
+  printf '%s' "$WS_PLUGINS" > "$WS_DIR/.plugins"; ck_set 1 done "built"
+else ck_set 1 done "up to date"; fi
 if dock run --rm workstation test -f /home/dev/.claude/.audio-needed >/dev/null 2>&1; then : > "$WS_DIR/.audio"; else rm -f "$WS_DIR/.audio"; fi
 
-# 7. import Claude + gh preferences (optional; host is only read)
-ck_set 6 doing
-mkdir -p "$WS_DIR/.claude"
-if [ -f "$WS_DIR/.claude/settings.json" ]; then ck_set 6 done "already imported"
-elif [ ! -f "$HOME/.claude/settings.json" ]; then ck_set 6 done "no local Claude — image defaults"
-else
-  do_import="$IMPORT_PREFS"
-  if [ -z "$do_import" ]; then
-    if [ "$ASSUME_YES" = 1 ]; then do_import=0
-    elif [ -r /dev/tty ]; then
-      ck_dirty; printf '  Import your local Claude + gh preferences (statusline, language, theme, gh config)? [Y/n]: '
-      read -r a < /dev/tty || a=y; case "$a" in n|N|no|NO) do_import=0 ;; *) do_import=1 ;; esac
-    else do_import=0; fi
-  fi
-  if [ "$do_import" = 1 ]; then
-    cp "$HOME/.claude/settings.json" "$WS_DIR/.claude/host-settings.json"
-    [ -f "$HOME/.claude/statusline.sh" ] && cp "$HOME/.claude/statusline.sh" "$WS_DIR/.claude/statusline.sh"
-    # keep OUR Serena/rtk hooks (from the image's committed settings); drop machine-specific keys
-    if dock run --rm -v "$WS_DIR:/ws" workstation bash -lc \
-        'jq -s ".[0] + {hooks: .[1].hooks} | del(.permissions, .enabledPlugins)" /ws/.claude/host-settings.json /ws/claude/settings.json > /ws/.claude/settings.json.tmp && mv /ws/.claude/settings.json.tmp /ws/.claude/settings.json' >/dev/null 2>&1
-    then _p="imported (Claude hooks kept)"; else _p="import failed — image defaults"; fi
-    rm -f "$WS_DIR/.claude/host-settings.json"
-    # gh CLI prefs (aliases/editor) — NOT hosts.yml (that holds the token; we use GH_TOKEN)
-    [ -f "$HOME/.config/gh/config.yml" ] && { mkdir -p "$WS_DIR/gh"; cp "$HOME/.config/gh/config.yml" "$WS_DIR/gh/config.yml"; _p="$_p + gh config"; }
-    # git identity (name/email) is passed per-run by 'task' via env. Commit SIGNING is left to the broker.
-    ck_set 6 done "$_p"
-  else ck_set 6 done "skipped — image defaults"; fi
-fi
+# 2. import preferences (apply the earlier decision; needs the image's jq)
+ck_set 2 doing
+if [ "$IMPORT_PREFS" = 1 ] && [ -f "$HOME/.claude/settings.json" ]; then
+  cp "$HOME/.claude/settings.json" "$WS_DIR/.claude/host-settings.json"
+  [ -f "$HOME/.claude/statusline.sh" ] && cp "$HOME/.claude/statusline.sh" "$WS_DIR/.claude/statusline.sh"
+  if dock run --rm -v "$WS_DIR:/ws" workstation bash -lc \
+      'jq -s ".[0] + {hooks: .[1].hooks} | del(.permissions, .enabledPlugins)" /ws/.claude/host-settings.json /ws/claude/settings.json > /ws/.claude/settings.json.tmp && mv /ws/.claude/settings.json.tmp /ws/.claude/settings.json' >/dev/null 2>&1
+  then _p="imported (Claude hooks kept)"; else _p="import failed — image defaults"; fi
+  rm -f "$WS_DIR/.claude/host-settings.json"
+  [ -f "$HOME/.config/gh/config.yml" ] && { mkdir -p "$WS_DIR/gh"; cp "$HOME/.config/gh/config.yml" "$WS_DIR/gh/config.yml"; _p="$_p + gh config"; }
+  ck_set 2 done "$_p"
+else ck_set 2 done "skipped — image defaults"; fi
 
-# 8. task command (auto-sourced in ~/.bashrc, removable block)
-ck_set 7 doing
+# 3. task command (auto-sourced in ~/.bashrc, removable block)
+ck_set 3 doing
 if ! grep -q '# >>> workstation >>>' "$HOME/.bashrc" 2>/dev/null; then
   { echo '# >>> workstation >>>'
     echo "export WORKSTATION_DIR=\"$WS_DIR\""
     echo "export WORKSTATION_RUNNING=\"$WS_RUNNING\""
     echo "source \"$WS_DIR/shell/task.sh\""
     echo '# <<< workstation <<<'; } >> "$HOME/.bashrc"
-  ck_set 7 done "added to ~/.bashrc"
-else ck_set 7 done "already in ~/.bashrc"; fi
+  ck_set 3 done "added to ~/.bashrc"
+else ck_set 3 done "already in ~/.bashrc"; fi
 
-# 9. GitHub auth (browser, only if needed)
-ck_set 8 doing
-if gh auth status >/dev/null 2>&1; then ck_set 8 done "already authenticated"
-elif [ -r /dev/tty ]; then ck_dirty; gh auth login --web --git-protocol https < /dev/tty || true; ck_set 8 done "done"
-else ck_set 8 done "no TTY — run 'gh auth login' later"; fi
+# 4. Claude login (reused already, or the deferred browser login — the only post-build prompt)
+ck_set 4 doing
+if [ "$NEED_LOGIN" = 1 ] && [ -r /dev/tty ]; then
+  ck_dirty
+  echo "  Logging into Claude inside a container — open the printed URL to authorize:"
+  dock run -it --rm -v "$WS_DIR/.claude:/seed" workstation \
+    bash -lc 'claude auth login && cp -f "$HOME/.claude/.credentials.json" /seed/.credentials.json' < /dev/tty || true
+  [ -f "$WS_DIR/.claude/.credentials.json" ] && ck_set 4 done "logged in" || ck_set 4 done "not logged in — run 'task auth'"
+elif [ "$NEED_LOGIN" = 1 ]; then ck_set 4 done "no TTY — run 'task auth' later"
+else ck_set 4 done "$CLAUDE_NOTE"; fi
 
-# 10. Claude credentials (stored in <workstation>/.claude; host ~/.claude only read)
-ck_set 9 doing
-mkdir -p "$WS_DIR/.claude"
-reused=0; _c=""
-if [ -f "$WS_DIR/.claude/.credentials.json" ]; then _c="already present"; reused=1
-elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then _c="using CLAUDE_CODE_OAUTH_TOKEN"; reused=1
-elif [ -f "$HOME/.claude/.credentials.json" ]; then
-  acct="$(grep -oE '"emailAddress"[[:space:]]*:[[:space:]]*"[^"]+"' "$HOME/.claude.json" 2>/dev/null | head -1 | sed -E 's/.*"([^"]+)"$/\1/')"
-  [ -z "$acct" ] && acct="unknown account"
-  if [ "$ASSUME_YES" = 1 ]; then ans=y
-  elif [ -r /dev/tty ]; then ck_dirty; printf '  Found a Claude login on this machine (account: %s).\n  Reuse it? [Y/n]: ' "$acct"; read -r ans < /dev/tty || ans=y
-  else ans=y; fi
-  case "${ans:-y}" in
-    n|N|no|NO) _c="will log in via browser" ;;
-    *) cp "$HOME/.claude/.credentials.json" "$WS_DIR/.claude/.credentials.json"; chmod 600 "$WS_DIR/.claude/.credentials.json"; _c="reused host login ($acct)"; reused=1 ;;
-  esac
-fi
-if [ "$reused" = 0 ]; then
-  if [ -r /dev/tty ]; then
-    ck_dirty
-    echo "  Logging into Claude inside a container — a URL/code will be printed; open it to authorize"
-    echo "  (the browser can't auto-open from inside the container):"
-    dock run -it --rm -v "$WS_DIR/.claude:/seed" workstation \
-      bash -lc 'claude auth login && cp -f "$HOME/.claude/.credentials.json" /seed/.credentials.json' < /dev/tty || true
-    [ -f "$WS_DIR/.claude/.credentials.json" ] && _c="logged in" || _c="not logged in — run 'task auth'"
-  else _c="no TTY — run 'task auth' later"; fi
-fi
-ck_set 9 done "$_c"
-
-# ---- final check + banner ----
+# ===== final check + banner =====
 ck_dirty; echo
 ok=1
 for c in docker git gh; do have "$c" || { echo "  ✗ $c MISSING"; ok=0; }; done
