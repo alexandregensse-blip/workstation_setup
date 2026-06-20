@@ -46,11 +46,13 @@ plugins="$(cat "$WS_DIR/.plugins" 2>/dev/null || true)"
 [ -n "$lang" ]    && echo "  keeping language: $lang"
 
 if [ "$FAST" = 1 ]; then
-  log "rebuild image 'workstation' (fast: reuse cache — repo changes only)"
-  dock build           --build-arg "WS_LANG=$lang" --build-arg "WS_PLUGINS=$plugins" -t workstation "$WS_DIR"
+  log "rebuild 'workstation' (fast: reuse base + cache — repo changes only)"
+  dock build --build-arg "WS_LANG=$lang" --build-arg "WS_PLUGINS=$plugins" -t workstation "$WS_DIR"
 else
-  log "rebuild image 'workstation' (fresh: --pull --no-cache → latest tools)"
-  dock build --pull --no-cache --build-arg "WS_LANG=$lang" --build-arg "WS_PLUGINS=$plugins" -t workstation "$WS_DIR"
+  log "rebuild base 'workstation-base' (fresh: --pull --no-cache → latest Claude/Serena/rtk)"
+  dock build --pull --no-cache -f "$WS_DIR/Dockerfile.base" -t workstation-base "$WS_DIR"
+  log "rebuild 'workstation' (config + plugins, on top of the base)"
+  dock build --build-arg "WS_LANG=$lang" --build-arg "WS_PLUGINS=$plugins" -t workstation "$WS_DIR"
 fi
 
 # refresh the host-side audio marker (plugins/image may have changed)

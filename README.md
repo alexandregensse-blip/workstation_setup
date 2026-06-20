@@ -104,6 +104,11 @@ Base: **Chainguard Wolfi** (`cgr.dev/chainguard/wolfi-base`) — a minimal, **gl
 (~14 MB base, ~0 CVEs). glibc is required by the prebuilt binaries (Claude Code, rtk, uv);
 **Alpine (musl) is avoided** (it breaks them). Final image ≈ **194 MB**, `dev` user at uid 1000.
 
+Built in **two layers**: a heavy **`workstation-base`** (the toolchain, from `Dockerfile.base`)
+built **once and reused**, and the thin **`workstation`** (config + plugins, from `Dockerfile`,
+`FROM workstation-base`) rebuilt on changes — so changing plugins/language **never re-downloads the
+toolchain**. `update.sh` rebuilds the base (fresh tools) unless you pass `--fast`.
+
 ## Update
 
 ```bash

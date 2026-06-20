@@ -1,0 +1,29 @@
+# workstation-base — the heavy, rarely-changing toolchain. Built ONCE and TAGGED
+# (workstation-base). The final 'workstation' image is FROM this, so changing plugins / language /
+# dotfiles rebuilds only a thin top layer and NEVER re-downloads the toolchain.
+#
+# Base: Chainguard Wolfi — minimal, glibc (required by the prebuilt Claude/rtk/uv binaries;
+# Alpine's musl would break them). `dev` at uid 1000 matches the host → host mounts are readable.
+FROM cgr.dev/chainguard/wolfi-base
+
+# System tools via apk (glibc). python3 kept on purpose: `uv -p 3.13` reuses it (smaller image).
+USER root
+RUN apk add --no-cache bash curl git ripgrep python3 gh jq ca-certificates-bundle shadow
+RUN useradd -m -u 1000 -s /bin/bash dev
+USER dev
+ENV HOME=/home/dev
+ENV PATH="/home/dev/.local/bin:${PATH}"
+WORKDIR /home/dev
+
+# uv, Claude Code, Serena, rtk — each wrapped in a retry-until-present loop so a flaky/slow link
+# doesn't fail the build on a transient drop.
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+RUN i=1; until curl -fsSL https://claude.ai/install.sh | bash && command -v claude >/dev/null 2>&1; do \
+      [ "$i" -ge 5 ] && { echo "claude install failed after $i tries"; exit 1; }; \
+      echo "  claude download interrupted — retry $i…"; i=$((i+1)); sleep 5; done
+RUN i=1; until uv tool install -p 3.13 serena-agent; do \
+      [ "$i" -ge 5 ] && { echo "serena install failed after $i tries"; exit 1; }; \
+      echo "  serena download interrupted — retry $i…"; i=$((i+1)); sleep 5; done; serena init
+RUN i=1; until curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh && command -v rtk >/dev/null 2>&1; do \
+      [ "$i" -ge 5 ] && { echo "rtk install failed after $i tries"; exit 1; }; \
+      echo "  rtk download interrupted — retry $i…"; i=$((i+1)); sleep 5; done

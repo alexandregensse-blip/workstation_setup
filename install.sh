@@ -123,7 +123,11 @@ fi
 WS_PLUGINS="$(printf '%s' "$WS_PLUGINS" | tr ',' ' ' | tr -s ' ' | sed 's/^ *//;s/ *$//')"
 [ -n "$WS_PLUGINS" ] && echo "  selected: $WS_PLUGINS" || echo "  none"
 
-log "docker image 'workstation' (build if missing or plugins changed)"
+log "docker base image 'workstation-base' (toolchain — built once, then reused)"
+if dock image inspect workstation-base >/dev/null 2>&1; then echo "  present ✓ (no re-download)"
+else build_quiet -f "$REPO_DIR/Dockerfile.base" -t workstation-base "$REPO_DIR" || { echo "⚠ base build failed — see above."; exit 1; }; fi
+
+log "docker image 'workstation' (config + plugins, on top of the base)"
 prev_plugins="$(cat "$WS_DIR/.plugins" 2>/dev/null || true)"
 if ! dock image inspect workstation >/dev/null 2>&1 || [ "$WS_PLUGINS" != "$prev_plugins" ]; then
   build_quiet --build-arg "WS_LANG=$WS_LANG" --build-arg "WS_PLUGINS=$WS_PLUGINS" -t workstation "$REPO_DIR" || { echo "⚠ image build failed — see above."; exit 1; }
