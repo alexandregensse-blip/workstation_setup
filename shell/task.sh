@@ -50,8 +50,14 @@ _task_clones(){ local b; b="$(_task_base)"; [ -d "$b" ] || return 0
 # Open <cmd> in a new terminal tab/window (best-effort; detects common emulators). The new shell is
 # interactive so 'task' (sourced from ~/.bashrc) is available, then runs <cmd>, then stays open.
 _task_newtab(){
-  local cmd="$1" run
-  run="$cmd; exec bash"
+  local cmd="$1" run pre="" v
+  # A new tab is spawned by the terminal/its daemon, NOT as a child of this shell, so vars you
+  # exported only here (e.g. WORKSTATION_CLAUDE_MODE=auto) wouldn't reach it — only ~/.bashrc would.
+  # Re-export the current values AFTER bashrc is sourced so the running shell's settings win.
+  for v in WORKSTATION_DIR WORKSTATION_RUNNING WORKSTATION_CLAUDE_MODE WORKSTATION_CLAUDE_MODEL WORKSTATION_CLAUDE_EFFORT WORKSTATION_DNS; do
+    [ -n "${!v:-}" ] && pre+="export $v=$(printf %q "${!v}"); "
+  done
+  run="${pre}${cmd}; exec bash"
   if   [ -n "${TMUX:-}" ];                                          then tmux new-window "bash -ic $(printf %q "$run")"
   elif command -v wezterm >/dev/null 2>&1 && [ -n "${WEZTERM_PANE:-}" ]; then wezterm cli spawn -- bash -ic "$run"
   elif command -v kitty  >/dev/null 2>&1 && [ -n "${KITTY_WINDOW_ID:-}" ]; then kitty @ launch --type=tab bash -ic "$run" >/dev/null 2>&1
@@ -183,13 +189,13 @@ _task_run(){
   [ -d "$dir" ] || { echo "task: no clone at $dir"; return 1; }
   local ws_dir dock; ws_dir="$(_task_wsdir)"; dock="$(_task_dock)"
 
-  # name the terminal tab/window after the task: "<repo> - <topic>" (topic = dir name minus the
-  # timestamp prefix). Works for a fresh 'task' (current tab) and for 'task resume' (each new tab).
+  # name the terminal tab "<repo> - <topic>" (topic = dir name minus the timestamp prefix). We also
+  # pass CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 below so Claude doesn't overwrite this during the session.
   local _tb _repo _topic _title
   _tb="$(basename "$dir")"; _repo="$(basename "$(dirname "$dir")")"; _topic="${_tb#*_}"
   [ "$_topic" = "$_tb" ] && _topic=""                      # name was just a timestamp → no topic
   _title="$_repo${_topic:+ - $_topic}"
-  printf '\033]0;%s\a' "$_title"                            # OSC 0 — honored by most terminals
+  printf '\033]0;%s\a' "$_title"                            # OSC 0 — honored by Ptyxis/most terminals
   [ -n "${TMUX:-}" ] && { tmux set-window-option automatic-rename off 2>/dev/null; tmux rename-window "$_title" 2>/dev/null; } || true
 
   local gh_token; gh_token="$(gh auth token 2>/dev/null || true)"
@@ -256,6 +262,7 @@ _task_run(){
     --name "task-$slug" \
     -v "$dir:/work" -w /work \
     -e GH_TOKEN="$gh_token" \
+    -e CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 \
     "${claude_auth[@]}" \
     "${cfg_mounts[@]}" \
     "${gitenv[@]}" \

@@ -32,7 +32,8 @@ self-contained `<workspace>/.workstation` dir** — the host is left in its init
 | `uninstall.sh` | Reverses it, asking **point-by-point**, then recaps (see §13). |
 | `update.sh` | Pulls latest + rebuilds the image (see §12). |
 | `plugins/` | Opt-in plugin registry (`available`) + installer (`install-plugin.sh`) (see §5). |
-| `Dockerfile` | The `workstation` image — bakes the toolchain **and** the config (Wolfi base). |
+| `Dockerfile.base` | The heavy **`workstation-base`** image — the toolchain (Claude/Serena/rtk/uv + apk tools), built once and reused. |
+| `Dockerfile` | The thin **`workstation`** image (`FROM workstation-base`) — bakes config/hooks/plugins; rebuilt on changes. |
 | `shell/task.sh` | The `task` shell function, **sourced straight from the clone**. |
 | `claude/CLAUDE.md` | Global code-exploration policy (Serena). Baked into the image at `~/.claude/CLAUDE.md`. |
 | `claude/settings.json` | Claude prefs **+ hooks** (Serena + rtk). Baked into the image. No hardcoded language. |
@@ -71,6 +72,7 @@ The prompt and `sudo` read from `/dev/tty`, so the pipe form stays interactive.
 | `--lang <code>`  | `WORKSTATION_LANG`  | Claude UI language (baked in the image) | unset (Claude default) |
 | `--import-prefs` / `--no-import-prefs` | `WORKSTATION_IMPORT_PREFS` | import this machine's Claude prefs (statusline/lang/theme) | ask if a local Claude is found |
 | `--plug-ins <list>` | `WORKSTATION_PLUGINS` | opt-in plugins, comma-separated keys | prompt per known plugin |
+| `--no-ipv6` / `--ipv6` | `WORKSTATION_IPV6` | enable Docker IPv6 (NAT66) for task containers (see §7a) | auto — on if the host has routable IPv6 |
 | `--yes` / `-y`   | —                   | non-interactive (skip prompt) | — |
 
 **Plugins (opt-in, baked on demand).** `plugins/available` lists selectable plugins; install offers
@@ -94,18 +96,24 @@ Missing flag values fail fast with a clear message (guarded against `set -u`).
    already present). Everything else is keyed off this dir (`REPO_DIR`).
 4. **Docker group** — `usermod -aG docker` unless already a member; if it adds you, it drops a
    `.docker-group-added` marker so uninstall can offer to undo exactly that.
-5. **Image build** — builds `workstation` if missing, passing the language as `--build-arg
-   WS_LANG`. Uses the `docker`-or-`sudo docker` wrapper (see §8). The image bakes the toolchain
-   **and** the dotfiles/hooks.
-6. **`task` command** — auto-sourced in `~/.bashrc` (once), inside a `# >>> workstation >>>` …
-   `# <<< workstation <<<` marked block that also exports `WORKSTATION_DIR`/`WORKSTATION_RUNNING`.
-   The block sources `task` **straight from the clone** (`$WS_DIR/shell/task.sh`).
-7. **GitHub auth** — `gh auth login --web` only if not already authenticated (skipped with no TTY).
-8. **Claude credentials** — logs in **inside a container** and copies the resulting
+5. **Docker IPv6 (dual-stack)** — when the host has routable IPv6, enable Docker IPv6 (NAT66) so
+   task containers aren't IPv4-only (see §7a). It **creates** `/etc/docker/daemon.json` (only if
+   absent — it never edits an existing one), restarts docker, drops a `.docker-ipv6` marker for the
+   uninstaller, and **rolls back** if docker doesn't come back up. Skip with `--no-ipv6`; auto-skipped
+   when the host has no IPv6.
+6. **Image build** — builds the heavy **`workstation-base`** (toolchain, from `Dockerfile.base`)
+   only if missing, then the thin **`workstation`** (config + plugins, `FROM workstation-base`),
+   passing `--build-arg WS_LANG`/`WS_PLUGINS`. Uses the `docker`-or-`sudo docker` wrapper (see §8).
+7. **`task` command** — auto-sourced in `~/.bashrc` (once), inside a `# >>> workstation >>>` …
+   `# <<< workstation <<<` marked block that also exports `WORKSTATION_DIR`/`WORKSTATION_RUNNING`
+   (and any `WORKSTATION_CLAUDE_*` launch defaults). The block sources `task` **straight from the
+   clone** (`$WS_DIR/shell/task.sh`).
+8. **GitHub auth** — `gh auth login --web` only if not already authenticated (skipped with no TTY).
+9. **Claude credentials** — logs in **inside a container** and copies the resulting
    `.credentials.json` to `<workspace>/.workstation/.claude/` (host `~/.claude` stays untouched).
    No-op if a stored file exists or `CLAUDE_CODE_OAUTH_TOKEN` is set; deferred to `task auth` if
    there's no TTY.
-9. **Confirmation banner** — verifies docker/git/gh + the image, prints locations and `task` usage.
+10. **Confirmation banner** — verifies docker/git/gh + the image, prints locations and `task` usage.
 
 **Idempotency**: re-running installs/configures only what is missing. The committed
 `settings.json` (baked in the image) is the single source of truth for hooks.
@@ -113,8 +121,11 @@ Missing flag values fail fast with a clear message (guarded against `set -u`).
 ## 6. Task workflow (`shell/task.sh`)
 
 ```
-task [--here | --at <path>] [repo] [topic]
-task auth        # (re)login to Claude, stored in <workspace>/.workstation/.claude
+task [--here | --at <path>] [repo] [topic]   # start a task (runs in the current tab)
+task resume                                   # reopen clones (checkbox menu), each in a new tab, CONTINUE its Claude session
+task cleanup [-y]                             # delete clones that are clean AND fully pushed
+task settings                                 # show install choices; edit the Claude launch defaults
+task auth                                     # (re)login to Claude, stored in <workspace>/.workstation/.claude
 ```
 
 1. **`task auth`** — runs `claude auth login` in a throwaway container and persists the
@@ -130,9 +141,19 @@ task auth        # (re)login to Claude, stored in <workspace>/.workstation/.clau
    topic) — WIP survives the container.
 5. **Branch** `task/<slug>` and push it.
 6. **Run** Claude inside the container: clone mounted at `/work`, `GH_TOKEN` injected, Claude
-   credentials mounted read-only, memory/cpu limits, `--rm` (disposable).
+   credentials mounted read-only, memory/cpu limits, `--rm` (disposable). The conversation history
+   is persisted on the host under the clone's `.git/claude-projects` (out of the worktree, removed
+   with the clone). Optional knobs: `WORKSTATION_CLAUDE_*` set launch flags (`--permission-mode` /
+   `--model` / `--effort`); `WORKSTATION_DNS` overrides the container resolver; the tab is titled
+   `<repo> - <topic>` and Claude runs with `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` so it keeps that.
 7. **On exit** — container destroyed; clone kept on host. Delete it only when `git status` is
    clean **and** nothing is unpushed (`git log @{u}..` empty).
+8. **`task resume`** — lists existing clones in a **checkbox menu** (arrow keys, Space/Enter toggle,
+   "Confirmer"), opens each pick in a **new terminal tab** (`task open`, propagating the current
+   `WORKSTATION_*` settings since the tab is spawned by the terminal, not this shell) and relaunches
+   the container with `claude --continue` so the saved conversation resumes. **`task cleanup`**
+   removes clones that are clean and fully pushed; **`task settings`** shows install choices and
+   edits the launch defaults in the `~/.bashrc` block.
 
 ## 7. The Docker image (`Dockerfile`)
 
@@ -150,6 +171,22 @@ task auth        # (re)login to Claude, stored in <workspace>/.workstation/.clau
   git credential helper (`!gh auth git-credential`) so in-container `git push` uses `GH_TOKEN`.
 
 Final image ≈ **194 MB**.
+
+**Two-layer build**: a heavy `workstation-base` (`Dockerfile.base`, the toolchain) built once and
+reused, and a thin `workstation` (`Dockerfile`, `FROM workstation-base`) for config/plugins — so
+changing language/plugins never re-downloads the toolchain. `update.sh` rebuilds only the layer
+whose inputs changed (§12).
+
+## 7a. Networking (containers ↔ Anthropic)
+
+Task containers use Docker's **default bridge**. On a **dual-stack** host (e.g. SFR fibre: native
+IPv6 + DS-Lite IPv4), the host transparently falls back to IPv6 when the IPv4 path degrades, but
+default-bridge containers are **IPv4-only** — so they stall (`FailedToOpenSocket` / `ConnectionRefused`
+inside the task) while the host session stays fine. Install therefore enables **Docker IPv6 (NAT66)**
+when it detects routable host IPv6 (§5, step 5): it creates `/etc/docker/daemon.json` with `ipv6` +
+`fixed-cidr-v6` + `ip6tables`, giving containers the same reach. Opt out with `--no-ipv6`. For a
+network with flaky DNS, `WORKSTATION_DNS="1.1.1.1 8.8.8.8"` makes `task` pass those resolvers via
+`--dns`. (Requires a recent Docker — NAT66 / `ip6tables` stable since Docker 27.)
 
 ## 8. Auth model
 
@@ -211,11 +248,13 @@ overwrites them.
 <workspace>/.workstation/update.sh        # pull latest + rebuild
 ```
 
-`git pull`s the clone, then rebuilds the image **keeping the baked language + plugins** (read from
-the current image and `.workstation/.plugins`). Default is a fresh rebuild (`--pull --no-cache`) so
-you get the latest Claude/Serena/rtk; `--fast` reuses the layer cache (repo changes only). Flags:
-`--dir`, `--home`, `--fast`, `--yes`. `task` is sourced from the clone, so shell changes apply in a
-new terminal.
+`git pull`s the clone, then rebuilds **only what the pull actually changed** — the base if
+`Dockerfile.base` moved, the thin image if config/plugins moved, or **nothing** if only docs/scripts
+changed — **keeping the baked language + plugins** (read from the current image and
+`.workstation/.plugins`). `--fresh` forces a from-scratch base (`--pull --no-cache`) to fetch the
+latest Claude/Serena/rtk. Output is concise (git's transfer noise is suppressed). Flags: `--dir`,
+`--home`, `--fresh`, `--yes`. `task` is sourced from the clone, so a shell change is applied by
+`source ~/.bashrc` (or a new terminal).
 
 ## 13. Uninstall (`uninstall.sh`)
 
@@ -224,12 +263,13 @@ removed vs kept.
 
 - **Auto-detects** the workstation dir and the `running` dir from the `WORKSTATION_DIR` /
   `WORKSTATION_RUNNING` exports in `~/.bashrc` (else `--dir`/`--home`, else `~/dev/…`).
-- **Asks, one at a time**, to remove: the `task` block in `~/.bashrc`; the `workstation` Docker
-  image; each apt package we installed (read from `.apt-installed` — only `docker`/`git`/`gh`,
-  still-present); your `docker`-group membership (only if a `.docker-group-added` marker shows we
-  added it); your **task clones** under `running` — **git-scanned first**, so it lists exactly which
-  clones still have uncommitted or unpushed work before you decide; and the `<workspace>/.workstation`
-  dir (clone + Claude credentials).
+- **Asks, one at a time**, to remove: the `task` block in `~/.bashrc`; the `workstation` and
+  `workstation-base` Docker images; each apt package we installed (read from `.apt-installed` — only
+  `docker`/`git`/`gh`, still-present); your `docker`-group membership (only if a `.docker-group-added`
+  marker shows we added it); the **Docker IPv6 `daemon.json`** (only if a `.docker-ipv6` marker shows
+  install created it — restarts docker); your **task clones** under `running` — **git-scanned first**,
+  so it lists exactly which clones still have uncommitted or unpushed work before you decide; and the
+  `<workspace>/.workstation` dir (clone + Claude credentials).
 - **Never touches**: `~/.claude` (never created), your gh login, or any tool you already had.
 - Flags: `--dir`, `--home`, `--yes` (assume yes to every prompt).
 
