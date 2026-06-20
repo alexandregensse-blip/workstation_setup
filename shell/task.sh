@@ -55,12 +55,63 @@ _task_newtab(){
   if   [ -n "${TMUX:-}" ];                                          then tmux new-window "bash -ic $(printf %q "$run")"
   elif command -v wezterm >/dev/null 2>&1 && [ -n "${WEZTERM_PANE:-}" ]; then wezterm cli spawn -- bash -ic "$run"
   elif command -v kitty  >/dev/null 2>&1 && [ -n "${KITTY_WINDOW_ID:-}" ]; then kitty @ launch --type=tab bash -ic "$run" >/dev/null 2>&1
+  elif command -v ptyxis >/dev/null 2>&1;                           then ptyxis --tab -- bash -ic "$run" >/dev/null 2>&1 &
   elif command -v gnome-terminal >/dev/null 2>&1;                   then gnome-terminal --tab -- bash -ic "$run" >/dev/null 2>&1
   elif command -v konsole >/dev/null 2>&1;                          then konsole --new-tab -e bash -ic "$run" >/dev/null 2>&1 &
   elif command -v xfce4-terminal >/dev/null 2>&1;                   then xfce4-terminal --tab -e "bash -ic '$run'" >/dev/null 2>&1 &
   elif command -v alacritty >/dev/null 2>&1;                        then alacritty -e bash -ic "$run" >/dev/null 2>&1 &
   elif command -v xterm >/dev/null 2>&1;                            then xterm -e bash -ic "$run" >/dev/null 2>&1 &
   else echo "  no known terminal to open a tab — run it yourself:  $cmd"; return 1; fi
+}
+
+# Interactive checkbox multi-select (used by 'resume' when fzf isn't installed). Arrow keys / j-k
+# move, Space or Enter toggles the highlighted row, choosing "Confirmer" validates, "Annuler"/q/ESC
+# aborts. UI is drawn on /dev/tty; the picks land in the global array _TASK_PICKED. Returns 1 if
+# nothing was chosen / aborted.
+_task_menu(){
+  _TASK_PICKED=()
+  [ -r /dev/tty ] || { echo "task: no TTY to choose."; return 1; }
+  local -a items=("$@"); local n=${#items[@]}
+  [ "$n" -gt 0 ] || return 1
+  local -a sel; local j box key rest
+  for ((j=0; j<n; j++)); do sel[j]=0; done
+  local cur=0 total=$((n+2)) confirm=$n cancel=$((n+1)) drawn=0
+  printf '\n  \033[1mReprendre quelle(s) task ?\033[0m\n  \033[2m↑/↓ déplacer · Espace/Entrée cocher · « Confirmer » pour valider · q/Échap annuler\033[0m\n' > /dev/tty
+  printf '\033[?25l' > /dev/tty                                    # hide cursor
+  while :; do
+    [ "$drawn" -gt 0 ] && printf '\033[%dA' "$drawn" > /dev/tty   # back to first row, redraw in place
+    for ((j=0; j<n; j++)); do
+      [ "${sel[j]}" = 1 ] && box=$'[\033[32m✓\033[0m]' || box='[ ]'
+      if [ "$j" = "$cur" ]; then printf '\033[K\033[7m %b %s \033[0m\n' "$box" "${items[j]}" > /dev/tty
+      else                       printf '\033[K %b %s\n'             "$box" "${items[j]}" > /dev/tty; fi
+    done
+    if [ "$cur" = "$confirm" ]; then printf '\033[K\033[7m \033[32m✔ Confirmer\033[0m \033[0m\n' > /dev/tty
+    else                             printf '\033[K   \033[32m✔ Confirmer\033[0m\n'                > /dev/tty; fi
+    if [ "$cur" = "$cancel" ];  then printf '\033[K\033[7m \033[31m✖ Annuler\033[0m \033[0m\n'   > /dev/tty
+    else                             printf '\033[K   \033[31m✖ Annuler\033[0m\n'                  > /dev/tty; fi
+    drawn=$total
+    IFS= read -rsn1 key < /dev/tty || break
+    case "$key" in
+      $'\033')
+        read -rsn2 -t 0.1 rest < /dev/tty || rest=""
+        case "$rest" in
+          '[A'|'OA') cur=$(( (cur-1+total)%total )) ;;
+          '[B'|'OB') cur=$(( (cur+1)%total )) ;;
+          *)         printf '\033[?25h\n' > /dev/tty; return 1 ;;   # bare ESC → abort
+        esac ;;
+      k|K) cur=$(( (cur-1+total)%total )) ;;
+      j|J) cur=$(( (cur+1)%total )) ;;
+      a|A) for ((j=0; j<n; j++)); do sel[j]=1; done ;;
+      q|Q) printf '\033[?25h\n' > /dev/tty; return 1 ;;
+      ' '|''|$'\n'|$'\r')
+        if   [ "$cur" -lt "$n" ];     then sel[cur]=$(( 1 - sel[cur] ))
+        elif [ "$cur" = "$confirm" ]; then break
+        else printf '\033[?25h\n' > /dev/tty; return 1; fi ;;
+    esac
+  done
+  printf '\033[?25h\n' > /dev/tty                                  # show cursor again
+  for ((j=0; j<n; j++)); do [ "${sel[j]}" = 1 ] && _TASK_PICKED+=("${items[j]}"); done
+  [ "${#_TASK_PICKED[@]}" -gt 0 ] || return 1
 }
 
 # resume: choose existing clones and reopen each in its own tab.
@@ -73,12 +124,9 @@ _task_resume(){
     mapfile -t chosen < <(printf '%s\n' "${clones[@]#"$b"/}" | fzf --multi --prompt='resume (TAB=select, ENTER=open)> ' --height=40%)
     local i; for i in "${!chosen[@]}"; do chosen[$i]="$b/${chosen[$i]}"; done
   else
-    [ -r /dev/tty ] || { echo "task: no TTY to choose."; return 1; }
-    echo "Resume which task(s)? space-separated numbers, or 'a' for all:"
-    local i=1 c; for c in "${clones[@]}"; do printf '  %2d) %s\n' "$i" "${c#"$b"/}"; i=$((i+1)); done
-    printf 'select: '; local picks; read -r picks < /dev/tty || return 1
-    [ "$picks" = a ] && picks="$(seq 1 "${#clones[@]}")"
-    local n d; for n in $picks; do d="${clones[$((n-1))]:-}"; [ -n "$d" ] && chosen+=("$d"); done
+    local -a rels=(); local c; for c in "${clones[@]}"; do rels+=("${c#"$b"/}"); done
+    _task_menu "${rels[@]}" || { echo "task: cancelled."; return 0; }
+    local r; for r in "${_TASK_PICKED[@]}"; do chosen+=("$b/$r"); done
   fi
   [ "${#chosen[@]}" -gt 0 ] || { echo "task: nothing selected."; return 0; }
   local d; for d in "${chosen[@]}"; do echo "→ opening ${d#"$b"/}"; _task_newtab "task open $(printf %q "$d")"; done

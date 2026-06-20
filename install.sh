@@ -205,16 +205,16 @@ fi
 WS_PLUGINS="$(printf '%s' "$WS_PLUGINS" | tr ',' ' ' | tr -s ' ' | sed 's/^ *//;s/ *$//')"
 echo "  → plugins: ${WS_PLUGINS:-none}"
 
-# fzf (optional, host) — gives 'task resume' a real interactive multi-select instead of numbers.
+# fzf (optional, host) — fuzzy multi-select for 'task resume' (otherwise a built-in checkbox menu).
 if command -v fzf >/dev/null 2>&1; then echo "  → fzf: already installed"
 elif [ "$ASSUME_YES" = 0 ] && [ -r /dev/tty ]; then
   printf "  Install fzf for a nicer interactive 'task resume' picker (optional)? [y/N]: "
   read -r a < /dev/tty || a=n
   case "$a" in
     y|Y|yes|YES) sudo apt install -y fzf && printf 'fzf\n' >> "$WS_DIR/.apt-installed" && echo "  → fzf installed" ;;
-    *) echo "  → fzf skipped ('task resume' will use a numbered picker)" ;;
+    *) echo "  → fzf skipped ('task resume' uses the built-in checkbox menu)" ;;
   esac
-else echo "  → fzf: not installed ('task resume' uses a numbered picker)"; fi
+else echo "  → fzf: not installed ('task resume' uses the built-in checkbox menu)"; fi
 
 # import prefs decision (the actual import happens after the build, which has jq)
 if [ -z "$IMPORT_PREFS" ]; then
