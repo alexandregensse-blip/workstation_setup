@@ -1,6 +1,6 @@
 # task — open an ISOLATED Claude session in a container.
 #
-#   task [--here | --at <path>] [repo] [topic]   # repo: prompted if omitted; topic: defaults to a timestamp
+#   task [--here | --at <path>] [repo] [topic]   # repo fuzzy-matched to your gh repos (asks if ambiguous/none); topic → timestamp if omitted
 #   task auth                                     # (re)login to Claude; stored in <workspace>/.workstation/.claude
 #
 # Container-only: the host has NO Claude/Serena/rtk — they live in the 'workstation' image.
@@ -13,6 +13,22 @@
 #   - Claude : credentials stored in the self-contained <workstation>/.claude, mounted
 #              read-only, else $CLAUDE_CODE_OAUTH_TOKEN, else a clear error ('task auth').
 # Docker auto-falls back to sudo if the docker group isn't active yet. No hardcoded paths.
+
+# Pick from a list on the terminal: numbered list goes to stderr, the chosen value to stdout.
+# A number selects from the list; anything else is taken as an explicit owner/name or URL.
+_task_pick(){
+  [ -r /dev/tty ] || return 1
+  local -a opts=("$@"); local i=1 o pick
+  for o in "${opts[@]}"; do printf '  %2d) %s\n' "$i" "$o" >&2; i=$((i+1)); done
+  printf 'repo [number, or owner/name, or URL]: ' >&2
+  read -r pick < /dev/tty || return 1
+  case "$pick" in
+    '') return 1 ;;
+    *[!0-9]*) printf '%s\n' "$pick" ;;
+    *) local sel="${opts[$((pick-1))]:-}"; [ -n "$sel" ] && printf '%s\n' "$sel" || return 1 ;;
+  esac
+}
+
 task() {
   local ws_dir="${WORKSTATION_DIR:-${WORKSTATION_HOME:-$HOME/dev}/.workstation}"
   local dock; dock=docker; docker info >/dev/null 2>&1 || dock="sudo docker"
@@ -49,29 +65,35 @@ task() {
     esac
   done
 
-  local repo="${1:-}" topic="${2:-}"
+  local repo="${1:-}" topic="${2:-}" orig="${1:-}"
 
-  # repo: if not given, offer known repos (from gh) to pick from, or type owner/name or a URL
-  if [ -z "$repo" ]; then
-    if [ -r /dev/tty ]; then
-      local -a known; mapfile -t known < <(gh repo list --limit 30 --json nameWithOwner --jq '.[].nameWithOwner' 2>/dev/null)
-      if [ "${#known[@]}" -gt 0 ]; then
-        echo "Which repo? (known repos below — pick a number, or type owner/name or a URL)"
-        local i=1 r; for r in "${known[@]}"; do printf '  %2d) %s\n' "$i" "$r"; i=$((i+1)); done
-      else
-        echo "Which repo? (type owner/name or a URL — 'gh auth login' to list yours)"
+  # ---- resolve the repo: explicit (owner/name or URL) used as-is, else fuzzy-matched to your gh repos ----
+  case "$repo" in
+    */*|*://*) : ;;                                   # explicit → use as-is
+    *)
+      local -a known=()
+      mapfile -t known < <(gh repo list --limit 200 --json nameWithOwner --jq '.[].nameWithOwner' 2>/dev/null)
+      if [ -z "$repo" ]; then                          # omitted → pick from the list
+        [ -r /dev/tty ] || { echo "usage: task [--here | --at <path>] [repo] [topic]   |   task auth"; return 1; }
+        echo "Which repo?"
+        repo="$(_task_pick "${known[@]}")" || { echo "task: no repo chosen."; return 1; }
+      elif [ "${#known[@]}" -gt 0 ]; then              # bare name → match it (case-insensitive)
+        local -a exact=() subs=(); local r name
+        for r in "${known[@]}"; do
+          name="${r##*/}"
+          if   [[ "${name,,}" == "${repo,,}" ]]; then exact+=("$r")
+          elif [[ "${name,,}" == *"${repo,,}"* || "${repo,,}" == *"${name,,}"* ]]; then subs+=("$r"); fi
+        done
+        if   [ "${#exact[@]}" -eq 1 ]; then repo="${exact[0]}"
+        elif [ "${#exact[@]}" -gt 1 ]; then echo "task: '$orig' matches several repos — pick one:"; repo="$(_task_pick "${exact[@]}")" || { echo "task: cancelled."; return 1; }
+        elif [ "${#subs[@]}"  -eq 1 ]; then echo "task: '$orig' → ${subs[0]}"; repo="${subs[0]}"
+        elif [ "${#subs[@]}"  -gt 1 ]; then echo "task: '$orig' matches several repos — pick one:"; repo="$(_task_pick "${subs[@]}")" || { echo "task: cancelled."; return 1; }
+        else echo "task: no repo matches '$orig' — pick one (or type owner/name or a URL):"; repo="$(_task_pick "${known[@]}")" || { echo "task: cancelled."; return 1; }
+        fi
       fi
-      local pick; printf 'repo: '; read -r pick < /dev/tty
-      case "$pick" in
-        '')        echo "task: no repo given."; return 1 ;;
-        *[!0-9]*)  repo="$pick" ;;                    # contains a non-digit → explicit name/URL
-        *)         repo="${known[$((pick-1))]:-}" ;;  # all digits → index into the list
-      esac
-      [ -z "$repo" ] && { echo "task: invalid selection."; return 1; }
-    else
-      echo "usage: task [--here | --at <path>] [repo] [topic]   |   task auth"; return 1
-    fi
-  fi
+      ;;
+  esac
+  [ -z "$repo" ] && { echo "task: no repo."; return 1; }
 
   # --- auth, checked up front (clear errors, no silent failure) ---
   local gh_token; gh_token="$(gh auth token 2>/dev/null || true)"
