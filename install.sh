@@ -284,7 +284,6 @@ EOF
 cat <<EOF
 
 'task' is in your ~/.bashrc. If 'task' isn't found in this shell yet:  source ~/.bashrc
-(the README one-liner ends with '&& source ~/.bashrc', which already does this — else a new terminal.)
 
 To remove everything later (asks before each step):  $WS_DIR/uninstall.sh
 EOF
