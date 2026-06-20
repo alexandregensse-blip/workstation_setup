@@ -8,6 +8,8 @@
 /.docker-group-added
 /.plugins
 /.audio
+/.dl-base
+/.dl-image
 /.claude/
 /gh/
 

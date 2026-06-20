@@ -84,27 +84,29 @@ human_size(){ local b="$1"
 # docker build whose checklist line <idx> shows: current Dockerfile step, downloaded-so-far vs an
 # estimated total (<est> MB, ~), live rate, elapsed seconds. 'downloaded' = host rx delta (approx).
 build_phase(){
-  local idx="$1" est="$2"; shift 2
+  local idx="$1" calib="$2"; shift 2
   if [ "$CK_TTY" != 1 ] || ! docker info >/dev/null 2>&1; then ck_dirty; dock build "$@"; return $?; fi
-  local logf t0 cur pid rc=0 iface rxf rx0 rx1 rate total=0 pct det
+  local logf t0 cur pid rc=0 ctr tx0 tx1 rate total=0 est=0 pct det
   logf="$(mktemp)"; t0=$SECONDS
-  iface="$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'dev \K\S+' || true)"
-  rxf="/sys/class/net/$iface/statistics/rx_bytes"
-  rx0="$(cat "$rxf" 2>/dev/null || echo 0)"
+  # docker0 tx = bytes the host pushes INTO containers ≈ the build's downloads (excludes browser/host).
+  ctr="/sys/class/net/docker0/statistics/tx_bytes"; [ -r "$ctr" ] || ctr=""
+  tx0="$( { [ -n "$ctr" ] && cat "$ctr"; } 2>/dev/null || echo 0)"
+  # estimated total = the real volume measured on a previous successful build (self-calibrating)
+  [ -n "$calib" ] && [ -r "$calib" ] && est="$(cat "$calib" 2>/dev/null || echo 0)"
   docker build "$@" >"$logf" 2>&1 & pid=$!
   while kill -0 "$pid" 2>/dev/null; do
     sleep 1
-    rx1="$(cat "$rxf" 2>/dev/null || echo 0)"; rate=$(( rx1 - rx0 )); [ "$rate" -lt 0 ] && rate=0
-    rx0="$rx1"; total=$(( total + rate ))
+    if [ -n "$ctr" ]; then tx1="$(cat "$ctr" 2>/dev/null || echo 0)"; rate=$(( tx1 - tx0 )); [ "$rate" -lt 0 ] && rate=0; tx0="$tx1"; total=$(( total + rate )); fi
     cur="$(grep -aoE '^Step [0-9]+/[0-9]+' "$logf" 2>/dev/null | tail -1)"
-    if [ ! -r "$rxf" ]; then det="${cur:-building} · $((SECONDS-t0))s"
+    if [ -z "$ctr" ]; then det="${cur:-building} · $((SECONDS-t0))s"
     elif [ "$est" -gt 0 ]; then
-      pct=$(( total / 1048576 * 100 / est )); [ "$pct" -gt 99 ] && pct=99
-      det="${cur:-building} · ↓ $(human_size "$total")/~${est}MB ${pct}% · $(human_rate "$rate") · $((SECONDS-t0))s"
+      pct=$(( total * 100 / est )); [ "$pct" -gt 99 ] && pct=99
+      det="${cur:-building} · ↓ $(human_size "$total")/$(human_size "$est") ${pct}% · $(human_rate "$rate") · $((SECONDS-t0))s"
     else det="${cur:-building} · ↓ $(human_size "$total") · $(human_rate "$rate") · $((SECONDS-t0))s"; fi
     ck_set "$idx" doing "$det"
   done
   wait "$pid" || rc=$?
+  [ "$rc" = 0 ] && [ -n "$calib" ] && [ "$total" -gt 0 ] && echo "$total" > "$calib"   # calibrate next time
   [ "$rc" != 0 ] && { ck_dirty; echo "  build FAILED (exit $rc) — last lines:"; tail -25 "$logf"; }
   rm -f "$logf"; return "$rc"
 }
@@ -200,14 +202,14 @@ printf '\n\033[1;36m== building (no more questions) ==\033[0m\n\n'; ck_render
 # 0. base image (toolchain — built once, then reused)
 ck_set 0 doing
 if dock image inspect workstation-base >/dev/null 2>&1; then ck_set 0 done "present (no re-download)"
-else build_phase 0 180 -f "$REPO_DIR/Dockerfile.base" -t workstation-base "$REPO_DIR" || { echo "⚠ base build failed — see above."; exit 1; }
+else build_phase 0 "$WS_DIR/.dl-base" -f "$REPO_DIR/Dockerfile.base" -t workstation-base "$REPO_DIR" || { echo "⚠ base build failed — see above."; exit 1; }
      ck_set 0 done "built"; fi
 
 # 1. workstation image (config + plugins, on top of the base)
 ck_set 1 doing
 prev_plugins="$(cat "$WS_DIR/.plugins" 2>/dev/null || true)"
 if ! dock image inspect workstation >/dev/null 2>&1 || [ "$WS_PLUGINS" != "$prev_plugins" ]; then
-  build_phase 1 0 --build-arg "WS_LANG=$WS_LANG" --build-arg "WS_PLUGINS=$WS_PLUGINS" -t workstation "$REPO_DIR" || { echo "⚠ image build failed — see above."; exit 1; }
+  build_phase 1 "$WS_DIR/.dl-image" --build-arg "WS_LANG=$WS_LANG" --build-arg "WS_PLUGINS=$WS_PLUGINS" -t workstation "$REPO_DIR" || { echo "⚠ image build failed — see above."; exit 1; }
   printf '%s' "$WS_PLUGINS" > "$WS_DIR/.plugins"; ck_set 1 done "built"
 else ck_set 1 done "up to date"; fi
 if dock run --rm workstation test -f /home/dev/.claude/.audio-needed >/dev/null 2>&1; then : > "$WS_DIR/.audio"; else rm -f "$WS_DIR/.audio"; fi
