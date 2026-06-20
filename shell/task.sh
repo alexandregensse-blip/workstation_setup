@@ -31,6 +31,12 @@ task — isolated Claude sessions in disposable containers.
   task auth                                    (Re)login to Claude.
   task help                                    This help.
 
+Launch flags — set these in your shell (or ~/.bashrc) and EVERY task starts that way:
+  WORKSTATION_CLAUDE_MODE=auto     permission mode: auto | acceptEdits | bypassPermissions | default
+  WORKSTATION_CLAUDE_MODEL=opus    model: an alias (opus/sonnet/…) or a full id
+  WORKSTATION_CLAUDE_EFFORT=high   effort: low | medium | high | xhigh | max
+(The container is the sandbox, so 'auto'/'bypassPermissions' is reasonable there.)
+
 (Note: 'man task' won't work — task is a shell function, not a man page. Use 'task help'.)
 EOF
 }
@@ -118,11 +124,21 @@ _task_run(){
   [ -f "$ws_dir/.claude/statusline.sh" ]  && cfg_mounts+=(-v "$ws_dir/.claude/statusline.sh:/home/dev/.claude/statusline.sh:ro")
   [ -f "$ws_dir/gh/config.yml" ]          && cfg_mounts+=(-v "$ws_dir/gh/config.yml:/home/dev/.config/gh/config.yml:ro")
 
-  # imported host onboarding/account state merged into the container's writable ~/.claude.json
-  local -a claude_cmd=(claude)
+  # Claude launch flags from env — set these (e.g. in ~/.bashrc) to apply to every task:
+  #   WORKSTATION_CLAUDE_MODE   → --permission-mode (auto | acceptEdits | bypassPermissions | default)
+  #   WORKSTATION_CLAUDE_MODEL  → --model (alias like 'opus'/'sonnet' or a full id)
+  #   WORKSTATION_CLAUDE_EFFORT → --effort (low | medium | high | xhigh | max)
+  local -a cflags=()
+  [ -n "${WORKSTATION_CLAUDE_MODE:-}" ]   && cflags+=(--permission-mode "$WORKSTATION_CLAUDE_MODE")
+  [ -n "${WORKSTATION_CLAUDE_MODEL:-}" ]  && cflags+=(--model "$WORKSTATION_CLAUDE_MODEL")
+  [ -n "${WORKSTATION_CLAUDE_EFFORT:-}" ] && cflags+=(--effort "$WORKSTATION_CLAUDE_EFFORT")
+  # imported host onboarding/account state merged into the container's writable ~/.claude.json at start
+  local -a claude_cmd
   if [ -f "$ws_dir/.claude/claude-keys.json" ]; then
     cfg_mounts+=(-v "$ws_dir/.claude/claude-keys.json:/seed/claude-keys.json:ro")
-    claude_cmd=(bash -lc 'jq -s ".[0] * .[1]" "$HOME/.claude.json" /seed/claude-keys.json > /tmp/cj 2>/dev/null && mv /tmp/cj "$HOME/.claude.json"; exec claude')
+    claude_cmd=(bash -lc 'jq -s ".[0] * .[1]" "$HOME/.claude.json" /seed/claude-keys.json > /tmp/cj 2>/dev/null && mv /tmp/cj "$HOME/.claude.json"; exec claude "$@"' _ "${cflags[@]}")
+  else
+    claude_cmd=(claude "${cflags[@]}")
   fi
 
   # git identity for in-container commits (attribution only — no secret), from host git

@@ -68,6 +68,15 @@ task help                        # full help (also shown for: task with no args)
 Clones on the host (under `running/`), branches `task/<slug>`, then runs Claude in a **disposable
 container** (Serena connected, auth mounted). On exit: container destroyed, clone kept on the host.
 
+**Auto-launch flags** — set these in your shell (or `~/.bashrc`) and every `task` starts that way
+(the container is the sandbox, so `auto`/`bypassPermissions` is reasonable):
+
+```bash
+export WORKSTATION_CLAUDE_MODE=auto      # --permission-mode: auto | acceptEdits | bypassPermissions | default
+export WORKSTATION_CLAUDE_MODEL=opus     # --model: alias or full id
+export WORKSTATION_CLAUDE_EFFORT=high    # --effort: low | medium | high | xhigh | max
+```
+
 > Everything Claude does stays in the container. The image uses a `dev` user
 > with **uid 1000** so host-mounted files (clone, credentials) are readable. Docker **auto-falls back
 > to `sudo`** until the `docker` group is active (next login) — so it works right away.
