@@ -216,6 +216,19 @@ elif [ -f "$HOME/.claude/.credentials.json" ]; then
 else NEED_LOGIN=1; CLAUDE_NOTE="will log in after the build"; fi
 echo "  → Claude: $CLAUDE_NOTE"
 
+# Claude launch defaults (written into the ~/.bashrc block so every task starts that way)
+CL_MODE="${WORKSTATION_CLAUDE_MODE:-}"; CL_MODEL="${WORKSTATION_CLAUDE_MODEL:-}"; CL_EFFORT="${WORKSTATION_CLAUDE_EFFORT:-}"
+if [ "$ASSUME_YES" = 0 ] && [ -r /dev/tty ] && [ -z "$CL_MODE$CL_MODEL$CL_EFFORT" ]; then
+  printf '  Set Claude launch defaults for every task (auto mode / model / effort)? [y/N]: '
+  read -r a < /dev/tty || a=n
+  case "$a" in y|Y|yes|YES)
+    printf '    permission mode [auto/acceptEdits/bypassPermissions/default, empty=auto]: '; read -r CL_MODE < /dev/tty; [ -z "$CL_MODE" ] && CL_MODE=auto
+    printf '    model (alias like opus/sonnet, or full id; empty=skip): '; read -r CL_MODEL < /dev/tty
+    printf '    effort [low/medium/high/xhigh/max, empty=skip]: '; read -r CL_EFFORT < /dev/tty ;;
+  esac
+fi
+echo "  → launch: mode=${CL_MODE:-default} model=${CL_MODEL:-default} effort=${CL_EFFORT:-default}"
+
 # ===== Execution — runs straight through (live checklist) =====
 printf '\n\033[1;36m== building (no more questions) ==\033[0m\n\n'; ck_render
 
@@ -261,6 +274,9 @@ if ! grep -q '# >>> workstation >>>' "$HOME/.bashrc" 2>/dev/null; then
   { echo '# >>> workstation >>>'
     echo "export WORKSTATION_DIR=\"$WS_DIR\""
     echo "export WORKSTATION_RUNNING=\"$WS_RUNNING\""
+    [ -n "$CL_MODE" ]   && echo "export WORKSTATION_CLAUDE_MODE=\"$CL_MODE\""
+    [ -n "$CL_MODEL" ]  && echo "export WORKSTATION_CLAUDE_MODEL=\"$CL_MODEL\""
+    [ -n "$CL_EFFORT" ] && echo "export WORKSTATION_CLAUDE_EFFORT=\"$CL_EFFORT\""
     echo "source \"$WS_DIR/shell/task.sh\""
     echo '# <<< workstation <<<'; } >> "$HOME/.bashrc"
   ck_set 3 done "added to ~/.bashrc"

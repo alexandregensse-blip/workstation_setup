@@ -28,6 +28,7 @@ task — isolated Claude sessions in disposable containers.
   task cleanup [-y]                            Delete task clones that are clean AND fully pushed.
                                                Asks per clone; -y / --yes deletes without asking.
                                                Clones with uncommitted or unpushed work are kept.
+  task settings                                Show your install choices; edit the Claude launch defaults.
   task auth                                    (Re)login to Claude.
   task help                                    This help.
 
@@ -104,6 +105,34 @@ _task_cleanup(){
   echo "cleanup: removed $removed, kept $kept  (clones with uncommitted/unpushed work are always kept)."
 }
 
+# settings: show the choices made at install + edit the Claude launch defaults (in the ~/.bashrc block).
+_task_settings(){
+  local ws_dir base; ws_dir="$(_task_wsdir)"; base="$(_task_base)"
+  echo "Workstation settings:"
+  echo "  workspace / .workstation (WORKSTATION_DIR):  $ws_dir"
+  echo "  task clones      (WORKSTATION_RUNNING):      $base"
+  echo "  plugins:                                     $(cat "$ws_dir/.plugins" 2>/dev/null || echo none)"
+  echo "  imported host prefs:                         $([ -f "$ws_dir/.claude/settings.json" ] && echo yes || echo no)"
+  echo "  onboarding/account imported:                 $([ -f "$ws_dir/.claude/claude-keys.json" ] && echo yes || echo no)"
+  echo "  Claude launch — mode:   ${WORKSTATION_CLAUDE_MODE:-default}"
+  echo "                  model:  ${WORKSTATION_CLAUDE_MODEL:-default}"
+  echo "                  effort: ${WORKSTATION_CLAUDE_EFFORT:-default}"
+  echo "  (plugins / language / paths are changed by re-running install or 'update' — they rebuild.)"
+  [ -r /dev/tty ] || return 0
+  printf '\nEdit the Claude launch defaults now? [y/N]: '; local a; read -r a < /dev/tty || a=n
+  case "$a" in y|Y|yes|YES) ;; *) return 0 ;; esac
+  local mode model effort bashrc="$HOME/.bashrc"
+  printf '  permission mode [auto/acceptEdits/bypassPermissions/default, empty=clear]: '; read -r mode   < /dev/tty
+  printf '  model (alias/id, empty=clear): ';                                            read -r model  < /dev/tty
+  printf '  effort [low/medium/high/xhigh/max, empty=clear]: ';                          read -r effort < /dev/tty
+  grep -q '# >>> workstation >>>' "$bashrc" 2>/dev/null || { echo "task: no workstation block in ~/.bashrc; set the WORKSTATION_CLAUDE_* vars yourself."; return 1; }
+  sed -i '/^export WORKSTATION_CLAUDE_/d' "$bashrc"                       # drop old, then re-insert (after RUNNING)
+  [ -n "$effort" ] && sed -i "/^export WORKSTATION_RUNNING=/a export WORKSTATION_CLAUDE_EFFORT=\"$effort\"" "$bashrc"
+  [ -n "$model" ]  && sed -i "/^export WORKSTATION_RUNNING=/a export WORKSTATION_CLAUDE_MODEL=\"$model\""  "$bashrc"
+  [ -n "$mode" ]   && sed -i "/^export WORKSTATION_RUNNING=/a export WORKSTATION_CLAUDE_MODE=\"$mode\""    "$bashrc"
+  echo "✓ updated. Run 'source ~/.bashrc' (or open a new terminal) to apply."
+}
+
 # Run the container for an existing clone dir (auth + mounts + docker run). Used by start and 'open'.
 _task_run(){
   local dir="$1" slug="$2"
@@ -132,14 +161,14 @@ _task_run(){
   [ -n "${WORKSTATION_CLAUDE_MODE:-}" ]   && cflags+=(--permission-mode "$WORKSTATION_CLAUDE_MODE")
   [ -n "${WORKSTATION_CLAUDE_MODEL:-}" ]  && cflags+=(--model "$WORKSTATION_CLAUDE_MODEL")
   [ -n "${WORKSTATION_CLAUDE_EFFORT:-}" ] && cflags+=(--effort "$WORKSTATION_CLAUDE_EFFORT")
-  # imported host onboarding/account state merged into the container's writable ~/.claude.json at start
-  local -a claude_cmd
-  if [ -f "$ws_dir/.claude/claude-keys.json" ]; then
-    cfg_mounts+=(-v "$ws_dir/.claude/claude-keys.json:/seed/claude-keys.json:ro")
-    claude_cmd=(bash -lc 'jq -s ".[0] * .[1]" "$HOME/.claude.json" /seed/claude-keys.json > /tmp/cj 2>/dev/null && mv /tmp/cj "$HOME/.claude.json"; exec claude "$@"' _ "${cflags[@]}")
-  else
-    claude_cmd=(claude "${cflags[@]}")
-  fi
+  # startup wrapper (in-container): merge imported host onboarding/account state if present,
+  # auto-trust the mounted /work dir so Claude doesn't ask, then exec claude with the launch flags.
+  [ -f "$ws_dir/.claude/claude-keys.json" ] && cfg_mounts+=(-v "$ws_dir/.claude/claude-keys.json:/seed/claude-keys.json:ro")
+  local -a claude_cmd=(bash -lc '
+    cfg="$HOME/.claude.json"; [ -f "$cfg" ] || printf "{}" > "$cfg"
+    [ -f /seed/claude-keys.json ] && { jq -s ".[0] * .[1]" "$cfg" /seed/claude-keys.json > /tmp/c1 2>/dev/null && mv /tmp/c1 "$cfg"; }
+    jq ".projects[\"/work\"] += {hasTrustDialogAccepted:true, hasCompletedProjectOnboarding:true}" "$cfg" > /tmp/c2 2>/dev/null && mv /tmp/c2 "$cfg"
+    exec claude "$@"' _ "${cflags[@]}")
 
   # git identity for in-container commits (attribution only — no secret), from host git
   local gname gemail; gname="$(git config --get user.name 2>/dev/null || true)"; gemail="$(git config --get user.email 2>/dev/null || true)"
@@ -173,8 +202,9 @@ _task_run(){
 task() {
   case "${1:-}" in
     ''|-h|--help|help|man|'?') _task_help; return 0 ;;
-    resume)  _task_resume; return $? ;;
-    cleanup) shift; _task_cleanup "$@"; return $? ;;
+    resume)   _task_resume; return $? ;;
+    cleanup)  shift; _task_cleanup "$@"; return $? ;;
+    settings) _task_settings; return $? ;;
     open)    [ -n "${2:-}" ] || { echo "usage: task open <clone-dir>"; return 1; }; _task_run "$2" "$(basename "$2")"; return $? ;;
     auth)
       local ws_dir dock; ws_dir="$(_task_wsdir)"; dock="$(_task_dock)"
