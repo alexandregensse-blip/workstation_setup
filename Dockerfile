@@ -1,7 +1,7 @@
-# "workstation" image — Pattern C, model A: Claude runs INSIDE the container.
+# "workstation" image — Claude runs INSIDE the container.
 # This is install.sh "baked": same tools, but as root at build time and WITHOUT auth
-# (tokens/credentials arrive at `run`). AGENT toolchain only (claude + serena + rtk);
-# per-language toolchains will come with per-project devcontainers (Pattern B, later).
+# (tokens/credentials arrive at `run`). Agent toolchain only (claude + serena + rtk);
+# per-language toolchains belong in per-project devcontainers.
 #
 # Base: Chainguard Wolfi (wolfi-base) — a minimal, glibc-based "undistro" for containers
 # (~14 MB base, ~0 CVEs, security patches in hours). glibc is REQUIRED by the prebuilt

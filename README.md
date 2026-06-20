@@ -30,8 +30,8 @@ curl -fsSL .../install.sh | bash -s -- --home ~/dev --yes
 | Flag / env | Meaning | Default |
 |---|---|---|
 | `--home`  / `WORKSTATION_HOME`  | workspace dir (clones + `.workstation`) | prompt, else `~/dev` |
-| `--repos` / `WORKSTATION_REPOS` | tasks base | `<home>/repos` |
-| `--dir`   / `WORKSTATION_DIR`   | where the workstation lives | `<home>/.workstation` |
+| `--running` / `WORKSTATION_RUNNING` | task clones base | `<workspace>/running` |
+| `--dir`   / `WORKSTATION_DIR`   | where the workstation lives | `<workspace>/.workstation` |
 | `--lang`  / `WORKSTATION_LANG`  | Claude UI language (baked in the image) | unset (Claude default) |
 | `--import-prefs` / `--no-import-prefs` | import this machine's Claude prefs (statusline/lang/theme) | ask if a local Claude is found |
 | `--plug-ins` / `WORKSTATION_PLUGINS` | opt-in plugins, comma-separated keys (see `plugins/available`) | prompt per known plugin |
@@ -52,16 +52,16 @@ else: no Claude/Serena/rtk/uv, no `~/.claude`.
 ## Work
 
 ```bash
-task <repo> <topic>              # default base
-task --here <repo> <topic>       # base = current directory
-task --at /path <repo> <topic>   # base = given path
+task [repo] [topic]              # repo: prompted (known repos) if omitted; topic: defaults to a timestamp
+task --here [repo] [topic]       # base = current directory
+task --at /path [repo] [topic]   # base = given path
 task auth                        # (re)login to Claude (stored in .workstation/.claude)
 ```
 
-Clones on the host, branches `task/<slug>`, then runs Claude in a **disposable container** (Serena
-connected, auth mounted). On exit: container destroyed, clone kept on the host.
+Clones on the host (under `running/`), branches `task/<slug>`, then runs Claude in a **disposable
+container** (Serena connected, auth mounted). On exit: container destroyed, clone kept on the host.
 
-> **Pattern C / model A**: everything Claude does stays in the container. The image uses a `dev` user
+> Everything Claude does stays in the container. The image uses a `dev` user
 > with **uid 1000** so host-mounted files (clone, credentials) are readable. Docker **auto-falls back
 > to `sudo`** until the `docker` group is active (next login) — so it works right away.
 
@@ -107,17 +107,22 @@ Base: **Chainguard Wolfi** (`cgr.dev/chainguard/wolfi-base`) — a minimal, **gl
 ## Update
 
 ```bash
-git -C <workspace>/.workstation pull
-docker build -t workstation <workspace>/.workstation
+<workspace>/.workstation/update.sh        # pull latest + rebuild (fresh Claude/Serena/rtk)
 ```
+
+Pulls the repo and rebuilds the image (keeping your language + plugins). `--fast` reuses the Docker
+cache (applies repo changes only, without re-fetching the tools). `task` is sourced from the clone,
+so a new terminal picks up shell changes.
 
 ## Uninstall
 
 ```bash
-<workspace>/.workstation/uninstall.sh        # asks before each step
+<workspace>/.workstation/uninstall.sh        # asks before each step, then recaps
 ```
 
 Removes, **one confirmation at a time**: the `task` block in `.bashrc`, the Docker image, the apt
 packages it installed (`docker`/`git`/`gh` — only those, read from a manifest), your docker-group
-membership (only if it added you), and the `.workstation` dir (clone + Claude credentials). **Your
-task clones are kept**, and nothing else on the host was ever touched. `--yes` for non-interactive.
+membership (only if it added you), your **task clones** under `running` (it **git-scans them first**
+and tells you which still have unpushed/uncommitted work), and the `.workstation` dir (clone +
+Claude credentials). Ends with a recap of what was removed vs kept; `~/.claude` and your gh login
+are never touched. `--yes` for non-interactive.

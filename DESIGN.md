@@ -14,8 +14,8 @@ self-contained `<workspace>/.workstation` dir** — the host is left in its init
 
 - **Local is a disposable cache; GitHub is the only source of truth.** Anything correct is
   pushed; a task folder (or container) can be destroyed at any time without loss.
-- **Pattern C / model A**: one container per task, and **Claude runs *inside* the container**,
-  so everything it does (bash, edits, Serena, running code) stays sandboxed from the host.
+- **One container per task**, and **Claude runs *inside* the container**, so everything it does
+  (bash, edits, Serena, running code) stays sandboxed from the host.
 - **The host stays clean.** Only `docker`, `git`, `gh` may be installed (if missing), and they
   are recorded so the uninstaller can offer to remove exactly those. No `claude`/`serena`/`rtk`/
   `uv` on the host, and `~/.claude` is never written there.
@@ -29,7 +29,9 @@ self-contained `<workspace>/.workstation` dir** — the host is left in its init
 | Path | Role |
 |---|---|
 | `install.sh` | One-command, idempotent installer (container-only). |
-| `uninstall.sh` | Reverses it, asking **point-by-point** (see §13). |
+| `uninstall.sh` | Reverses it, asking **point-by-point**, then recaps (see §13). |
+| `update.sh` | Pulls latest + rebuilds the image (see §12). |
+| `plugins/` | Opt-in plugin registry (`available`) + installer (`install-plugin.sh`) (see §5). |
 | `Dockerfile` | The `workstation` image — bakes the toolchain **and** the config (Wolfi base). |
 | `shell/task.sh` | The `task` shell function, **sourced straight from the clone**. |
 | `claude/CLAUDE.md` | Global code-exploration policy (Serena). Baked into the image at `~/.claude/CLAUDE.md`. |
@@ -43,8 +45,7 @@ The dotfiles are **deployed into the image only** — never copied to the host.
 ## 4. Components (all inside the image)
 
 - **Claude Code** — the agent CLI (native installer, glibc binary).
-- **Serena** (`serena-agent`, MIT) — semantic code MCP server (LSP-based). License-safe for
-  commercial use, unlike jCodeMunch (dual-licensed) which this setup replaced.
+- **Serena** (`serena-agent`, MIT) — semantic code MCP server (LSP-based), free for commercial use.
 - **rtk** (`rtk-ai/rtk`, MIT) — token-saving CLI proxy; hooks into Claude's Bash tool.
 - **uv** — installs Serena and its standalone Python.
 - **gh**, **git**, **ripgrep**, **jq**, **python3** — image tools.
@@ -65,8 +66,8 @@ The prompt and `sudo` read from `/dev/tty`, so the pipe form stays interactive.
 | Flag | Env | Meaning | Default |
 |---|---|---|---|
 | `--home <path>`  | `WORKSTATION_HOME`  | workspace dir (clones + `.workstation`) | prompt, else `~/dev` |
-| `--repos <path>` | `WORKSTATION_REPOS` | tasks base | `<home>/repos` |
-| `--dir <path>`   | `WORKSTATION_DIR`   | where the workstation lives | `<home>/.workstation` |
+| `--running <path>` | `WORKSTATION_RUNNING` | task clones base | `<workspace>/running` |
+| `--dir <path>`   | `WORKSTATION_DIR`   | where the workstation lives | `<workspace>/.workstation` |
 | `--lang <code>`  | `WORKSTATION_LANG`  | Claude UI language (baked in the image) | unset (Claude default) |
 | `--import-prefs` / `--no-import-prefs` | `WORKSTATION_IMPORT_PREFS` | import this machine's Claude prefs (statusline/lang/theme) | ask if a local Claude is found |
 | `--plug-ins <list>` | `WORKSTATION_PLUGINS` | opt-in plugins, comma-separated keys | prompt per known plugin |
@@ -97,7 +98,7 @@ Missing flag values fail fast with a clear message (guarded against `set -u`).
    WS_LANG`. Uses the `docker`-or-`sudo docker` wrapper (see §8). The image bakes the toolchain
    **and** the dotfiles/hooks.
 6. **`task` command** — auto-sourced in `~/.bashrc` (once), inside a `# >>> workstation >>>` …
-   `# <<< workstation <<<` marked block that also exports `WORKSTATION_DIR`/`WORKSTATION_REPOS`.
+   `# <<< workstation <<<` marked block that also exports `WORKSTATION_DIR`/`WORKSTATION_RUNNING`.
    The block sources `task` **straight from the clone** (`$WS_DIR/shell/task.sh`).
 7. **GitHub auth** — `gh auth login --web` only if not already authenticated (skipped with no TTY).
 8. **Claude credentials** — logs in **inside a container** and copies the resulting
@@ -112,19 +113,21 @@ Missing flag values fail fast with a clear message (guarded against `set -u`).
 ## 6. Task workflow (`shell/task.sh`)
 
 ```
-task [--here | --at <path>] <repo> <topic>
+task [--here | --at <path>] [repo] [topic]
 task auth        # (re)login to Claude, stored in <workspace>/.workstation/.claude
 ```
 
 1. **`task auth`** — runs `claude auth login` in a throwaway container and persists the
    credentials to `<workspace>/.workstation/.claude/.credentials.json`.
-2. **Base selection** — `--here` (`$PWD`) > `--at <path>` > `$WORKSTATION_REPOS` >
-   `${WORKSTATION_HOME:-$HOME/dev}/repos`.
+2. **Base selection** — `--here` (`$PWD`) > `--at <path>` > `$WORKSTATION_RUNNING` >
+   `${WORKSTATION_HOME:-$HOME/dev}/running`. **Repo**: if omitted, pick from your `gh` repos or
+   type `owner/name`/URL. **Topic**: if omitted, a timestamp is used as the task name.
 3. **Auth checked up front** (no silent failure):
    - GitHub: requires `gh auth token` (else clear error).
    - Claude: mounts `<workstation>/.claude/.credentials.json` **if it exists**, else uses
      `$CLAUDE_CODE_OAUTH_TOKEN`, else a clear error pointing to `task auth`.
-4. **Clone on the host** → `<base>/<repo>/<YYYYMMDD-HHMM>_<slug>` — WIP survives the container.
+4. **Clone on the host** → `<base>/<repo>/<YYYYMMDD-HHMMSS>_<slug>` (just the timestamp if no
+   topic) — WIP survives the container.
 5. **Branch** `task/<slug>` and push it.
 6. **Run** Claude inside the container: clone mounted at `/work`, `GH_TOKEN` injected, Claude
    credentials mounted read-only, memory/cpu limits, `--rm` (disposable).
@@ -133,10 +136,9 @@ task auth        # (re)login to Claude, stored in <workspace>/.workstation/.clau
 
 ## 7. The Docker image (`Dockerfile`)
 
-- **Base: Chainguard Wolfi** (`wolfi-base`). Chosen after benchmarking: it is **glibc**
-  (required by the prebuilt Claude/rtk/uv binaries — Alpine's musl would break them), yet
-  far smaller and lower-CVE than Debian/Ubuntu. Distroless/scratch were excluded (no shell /
-  package manager to install tools at build).
+- **Base: Chainguard Wolfi** (`wolfi-base`) — **glibc** (required by the prebuilt Claude/rtk/uv
+  binaries; Alpine's musl would break them), minimal and low-CVE, with a shell + `apk` to install
+  the tools at build.
 - **`dev` user, uid 1000** — explicitly created to match the host user, so host-mounted files
   (clone, `0600` credentials) are readable. (A default new user would get uid 1001 and fail.)
 - **Tools**: bash, curl, git, ripgrep, **python3** (kept — `uv -p 3.13` reuses it, which makes
@@ -185,11 +187,10 @@ overwrites them.
 - **Container-only / host left clean** — the AI toolchain and config never touch the host; they
   live in the image and in `<workspace>/.workstation`. Only docker/git/gh may be installed, and
   they're tracked for a precise, point-by-point uninstall.
-- **Serena over jCodeMunch** — jCodeMunch is dual-licensed (paid for commercial use); Serena is
-  MIT, so it stays free as usage goes from personal to professional.
-- **Wolfi base** — most minimal option that keeps glibc + near-zero CVEs.
-- **Clone-per-task → container-per-task** — directories give light isolation; containers give
-  strong isolation (filesystem/process/network) and match the future multi-agent model.
+- **Serena (MIT) for code intelligence** — LSP-based semantic MCP, free for commercial use.
+- **Wolfi base** — minimal, glibc, near-zero CVEs.
+- **Container per task** — strong isolation (filesystem/process/network) and a fit for the
+  multi-agent model.
 - **No hardcoded absolute paths** — everything is `$HOME`/workspace-relative; `/home/dev` is
   internal to the image only.
 - **Repo stores hand-made config only** — the policy, prefs, hooks, statusline; secrets and
@@ -204,26 +205,32 @@ overwrites them.
 - The **autodev / headless** side (bot identity, hardened sandbox, orchestration) is future
   work — the image and container model are the shared foundation.
 
-## 12. Update
+## 12. Update (`update.sh`)
 
 ```bash
-git -C <workspace>/.workstation pull
-docker build -t workstation <workspace>/.workstation
+<workspace>/.workstation/update.sh        # pull latest + rebuild
 ```
+
+`git pull`s the clone, then rebuilds the image **keeping the baked language + plugins** (read from
+the current image and `.workstation/.plugins`). Default is a fresh rebuild (`--pull --no-cache`) so
+you get the latest Claude/Serena/rtk; `--fast` reuses the layer cache (repo changes only). Flags:
+`--dir`, `--home`, `--fast`, `--yes`. `task` is sourced from the clone, so shell changes apply in a
+new terminal.
 
 ## 13. Uninstall (`uninstall.sh`)
 
-Small footprint, **point-by-point confirmation** before every change (your work is never touched).
+Small footprint, **point-by-point confirmation** before every change, then a **recap** of what was
+removed vs kept.
 
-- **Auto-detects** the workstation dir from the `WORKSTATION_DIR` export in `~/.bashrc` (else
-  `--dir`/`--home`, else `~/dev/.workstation`).
+- **Auto-detects** the workstation dir and the `running` dir from the `WORKSTATION_DIR` /
+  `WORKSTATION_RUNNING` exports in `~/.bashrc` (else `--dir`/`--home`, else `~/dev/…`).
 - **Asks, one at a time**, to remove: the `task` block in `~/.bashrc`; the `workstation` Docker
   image; each apt package we installed (read from `.apt-installed` — only `docker`/`git`/`gh`,
-  and only those still present); your `docker`-group membership (only if a `.docker-group-added`
-  marker shows we added it); and finally the `<workspace>/.workstation` dir (clone + Claude
-  credentials).
-- **Never had to touch**: `~/.claude` (never created), your gh login, your task clones, or any
-  tool you already had — so there's nothing else to undo.
+  still-present); your `docker`-group membership (only if a `.docker-group-added` marker shows we
+  added it); your **task clones** under `running` — **git-scanned first**, so it lists exactly which
+  clones still have uncommitted or unpushed work before you decide; and the `<workspace>/.workstation`
+  dir (clone + Claude credentials).
+- **Never touches**: `~/.claude` (never created), your gh login, or any tool you already had.
 - Flags: `--dir`, `--home`, `--yes` (assume yes to every prompt).
 
 ## 14. Future: autodev / headless agents

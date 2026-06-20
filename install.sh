@@ -14,8 +14,8 @@
 #
 # Flags / env (all optional):
 #   --home  <path>  (WORKSTATION_HOME)   workspace dir for task clones  [prompt; default ~/dev]
-#   --repos <path>  (WORKSTATION_REPOS)  tasks base                     [default <home>/repos]
-#   --dir   <path>  (WORKSTATION_DIR)    where the workstation lives    [default <home>/.workstation]
+#   --running <path>  (WORKSTATION_RUNNING)  tasks base                     [default <workspace>/running]
+#   --dir   <path>  (WORKSTATION_DIR)    where the workstation lives    [default <workspace>/.workstation]
 #   --lang  <code>  (WORKSTATION_LANG)   Claude UI language (image)     [default: unset / Claude default]
 #   --import-prefs | --no-import-prefs   import this machine's Claude prefs (statusline/lang/theme)  [default: ask]
 #   --plug-ins <list> (WORKSTATION_PLUGINS) opt-in plugins, comma-separated keys (see plugins/available)  [default: prompt]
@@ -24,7 +24,7 @@
 set -euo pipefail
 
 WS_HOME="${WORKSTATION_HOME:-}"
-WS_REPOS="${WORKSTATION_REPOS:-}"
+WS_RUNNING="${WORKSTATION_RUNNING:-}"
 WS_DIR="${WORKSTATION_DIR:-}"
 WS_LANG="${WORKSTATION_LANG:-}"
 IMPORT_PREFS="${WORKSTATION_IMPORT_PREFS:-}"   # ""=ask, 1=yes, 0=no
@@ -35,14 +35,14 @@ WS_URL="https://github.com/alexandregensse-blip/workstation_setup"
 while [ $# -gt 0 ]; do
   case "$1" in
     --home)   WS_HOME="${2:?--home requires a path}";   WS_HOME="${WS_HOME/#\~/$HOME}";   shift 2 ;;
-    --repos)  WS_REPOS="${2:?--repos requires a path}"; WS_REPOS="${WS_REPOS/#\~/$HOME}"; shift 2 ;;
+    --running)  WS_RUNNING="${2:?--running requires a path}"; WS_RUNNING="${WS_RUNNING/#\~/$HOME}"; shift 2 ;;
     --dir)    WS_DIR="${2:?--dir requires a path}";     WS_DIR="${WS_DIR/#\~/$HOME}";     shift 2 ;;
     --lang)   WS_LANG="${2:?--lang requires a code}";   shift 2 ;;
     --import-prefs)    IMPORT_PREFS=1; shift ;;
     --no-import-prefs) IMPORT_PREFS=0; shift ;;
     --plug-ins) WS_PLUGINS="${2:?--plug-ins requires a comma-separated list}"; shift 2 ;;
     -y|--yes) ASSUME_YES=1; shift ;;
-    *) echo "unknown flag: $1  (use --home/--repos/--dir/--lang/--import-prefs/--no-import-prefs/--plug-ins/--yes)"; exit 1 ;;
+    *) echo "unknown flag: $1  (use --home/--running/--dir/--lang/--import-prefs/--no-import-prefs/--plug-ins/--yes)"; exit 1 ;;
   esac
 done
 
@@ -70,7 +70,7 @@ if [ -z "$WS_HOME" ]; then
   else WS_HOME="$HOME/dev"; fi
 fi
 WS_DIR="${WS_DIR:-$WS_HOME/.workstation}"
-WS_REPOS="${WS_REPOS:-$WS_HOME/repos}"
+WS_RUNNING="${WS_RUNNING:-$WS_HOME/running}"
 
 log "sudo"
 sudo -v
@@ -80,7 +80,7 @@ need=""
 for pair in docker.io:docker git:git gh:gh; do
   have "${pair#*:}" || need="$need ${pair%:*}"
 done
-mkdir -p "$WS_HOME" "$WS_REPOS"
+mkdir -p "$WS_HOME" "$WS_RUNNING"
 if [ -n "$need" ]; then sudo apt update && sudo apt install -y $need; else echo "  all present ✓"; fi
 
 log "fetch workstation into $WS_DIR (self-contained, inside your workspace)"
@@ -146,7 +146,7 @@ log "task command (auto-sourced in ~/.bashrc, removable block)"
 if ! grep -q '# >>> workstation >>>' "$HOME/.bashrc" 2>/dev/null; then
   { echo '# >>> workstation >>>'
     echo "export WORKSTATION_DIR=\"$WS_DIR\""
-    echo "export WORKSTATION_REPOS=\"$WS_REPOS\""
+    echo "export WORKSTATION_RUNNING=\"$WS_RUNNING\""
     echo "source \"$WS_DIR/shell/task.sh\""
     echo '# <<< workstation <<<'; } >> "$HOME/.bashrc"
 fi
@@ -198,12 +198,12 @@ cat <<EOF
 Inside the container (the 'workstation' image):
   Claude Code · Serena MCP · rtk (hooks pre-wired) · uv · git · gh · ripgrep · python3 · jq
 
-Locations:  workstation: $WS_DIR    workspace: $WS_HOME    task clones: $WS_REPOS
+Locations:  workstation: $WS_DIR    workspace: $WS_HOME    task clones: $WS_RUNNING
 
 task commands (isolated Claude session in a container):
-  task <repo> <topic>                  → clones into $WS_REPOS
-  task --here <repo> <topic>           → base = current directory
-  task --at <path> <repo> <topic>      → base = given path
+  task [repo] [topic]                  → clones into $WS_RUNNING (repo prompted if omitted; topic → timestamp)
+  task --here [repo] [topic]           → base = current directory
+  task --at <path> [repo] [topic]      → base = given path
   task auth                            → (re)login to Claude (stored in .workstation/.claude)
   e.g.  task claude-autodev fix-login
 EOF

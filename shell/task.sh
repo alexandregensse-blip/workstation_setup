@@ -1,11 +1,11 @@
-# task — open an ISOLATED Claude session in a container (Pattern C, model A).
+# task — open an ISOLATED Claude session in a container.
 #
-#   task [--here | --at <path>] <repo> <topic>
-#   task auth                         # (re)login to Claude; stored in <workspace>/.workstation/.claude
+#   task [--here | --at <path>] [repo] [topic]   # repo: prompted if omitted; topic: defaults to a timestamp
+#   task auth                                     # (re)login to Claude; stored in <workspace>/.workstation/.claude
 #
 # Container-only: the host has NO Claude/Serena/rtk — they live in the 'workstation' image.
-# Clone base (priority): --here ($PWD) > --at <path> > $WORKSTATION_REPOS
-#   > ${WORKSTATION_HOME:-$HOME/dev}/repos.
+# Clone base (priority): --here ($PWD) > --at <path> > $WORKSTATION_RUNNING
+#   > ${WORKSTATION_HOME:-$HOME/dev}/running.
 #
 # Clones on the HOST (WIP survives the disposable container), creates the branch, then runs
 # Claude INSIDE the container. Auth:
@@ -38,7 +38,7 @@ task() {
     return $?
   fi
 
-  local base="${WORKSTATION_REPOS:-${WORKSTATION_HOME:-$HOME/dev}/repos}"
+  local base="${WORKSTATION_RUNNING:-${WORKSTATION_HOME:-$HOME/dev}/running}"
   while [ $# -gt 0 ]; do
     case "$1" in
       --here) base="$PWD"; shift ;;
@@ -50,8 +50,27 @@ task() {
   done
 
   local repo="${1:-}" topic="${2:-}"
-  if [ -z "$repo" ] || [ -z "$topic" ]; then
-    echo "usage: task [--here | --at <path>] <repo> <topic>   |   task auth"; return 1
+
+  # repo: if not given, offer known repos (from gh) to pick from, or type owner/name or a URL
+  if [ -z "$repo" ]; then
+    if [ -r /dev/tty ]; then
+      local -a known; mapfile -t known < <(gh repo list --limit 30 --json nameWithOwner --jq '.[].nameWithOwner' 2>/dev/null)
+      if [ "${#known[@]}" -gt 0 ]; then
+        echo "Which repo? (known repos below — pick a number, or type owner/name or a URL)"
+        local i=1 r; for r in "${known[@]}"; do printf '  %2d) %s\n' "$i" "$r"; i=$((i+1)); done
+      else
+        echo "Which repo? (type owner/name or a URL — 'gh auth login' to list yours)"
+      fi
+      local pick; printf 'repo: '; read -r pick < /dev/tty
+      case "$pick" in
+        '')        echo "task: no repo given."; return 1 ;;
+        *[!0-9]*)  repo="$pick" ;;                    # contains a non-digit → explicit name/URL
+        *)         repo="${known[$((pick-1))]:-}" ;;  # all digits → index into the list
+      esac
+      [ -z "$repo" ] && { echo "task: invalid selection."; return 1; }
+    else
+      echo "usage: task [--here | --at <path>] [repo] [topic]   |   task auth"; return 1
+    fi
   fi
 
   # --- auth, checked up front (clear errors, no silent failure) ---
@@ -72,9 +91,14 @@ task() {
   fi
 
   local slug ts dir
+  ts=$(date +%Y%m%d-%H%M%S)
   slug=$(printf '%s' "$topic" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9-')
-  ts=$(date +%Y%m%d-%H%M)
-  dir="$base/${repo##*/}/${ts}_$slug"
+  if [ -n "$slug" ]; then
+    dir="$base/${repo##*/}/${ts}_$slug"
+  else
+    slug="$ts"                                  # no topic given → the timestamp is the task name
+    dir="$base/${repo##*/}/$ts"
+  fi
   mkdir -p "$(dirname "$dir")"
 
   gh repo clone "$repo" "$dir" || return 1
