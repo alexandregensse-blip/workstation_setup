@@ -85,4 +85,7 @@ fi
 
 echo "✓ Up to date."
 # 'task' is sourced from the clone; a child script can't reload it into your current shell.
-[ "$task_changed" = 1 ] && echo "  'task' changed — reload it:  source ~/.bashrc   (or open a new terminal)"
+if [ "$task_changed" = 1 ]; then
+  echo "  'task' changed — reload it:  source ~/.bashrc   (or open a new terminal)"
+fi
+exit 0
