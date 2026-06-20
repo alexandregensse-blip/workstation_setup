@@ -27,9 +27,15 @@ WORKDIR /home/dev
 
 # 3. uv, Claude Code, Serena, rtk — same installers as install.sh (all glibc binaries)
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-RUN curl -fsSL https://claude.ai/install.sh | bash
-RUN uv tool install -p 3.13 serena-agent && serena init
-RUN curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh
+RUN i=1; until curl -fsSL https://claude.ai/install.sh | bash && command -v claude >/dev/null 2>&1; do \
+      [ "$i" -ge 5 ] && { echo "claude install failed after $i tries"; exit 1; }; \
+      echo "  claude download interrupted — retry $i…"; i=$((i+1)); sleep 5; done
+RUN i=1; until uv tool install -p 3.13 serena-agent; do \
+      [ "$i" -ge 5 ] && { echo "serena install failed after $i tries"; exit 1; }; \
+      echo "  serena download interrupted — retry $i…"; i=$((i+1)); sleep 5; done; serena init
+RUN i=1; until curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh && command -v rtk >/dev/null 2>&1; do \
+      [ "$i" -ge 5 ] && { echo "rtk install failed after $i tries"; exit 1; }; \
+      echo "  rtk download interrupted — retry $i…"; i=$((i+1)); sleep 5; done
 
 # 4. Hand-made dotfiles (Serena policy, prefs + hooks, statusline, convention)
 RUN mkdir -p /home/dev/.claude /home/dev/dev

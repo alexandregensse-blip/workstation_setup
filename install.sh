@@ -54,6 +54,21 @@ dock(){ if docker info >/dev/null 2>&1; then docker "$@"; else sudo docker "$@";
 banner(){ local msg="  ✓  $1" w=46 line='' pad; while [ "${#line}" -lt "$w" ]; do line+='═'; done
   pad=$(( w - ${#msg} )); [ "$pad" -lt 0 ] && pad=0
   printf '╔%s╗\n║%s%*s║\n╚%s╝\n' "$line" "$msg" "$pad" '' "$line"; }
+# docker build with ONE live progress line (current Dockerfile step + elapsed), verbose output
+# hidden; on failure shows the tail. Plain build if no TTY or docker needs sudo (can't background it).
+build_quiet(){
+  if [ ! -t 1 ] || ! docker info >/dev/null 2>&1; then dock build "$@"; return $?; fi
+  local logf t0 cur pid rc=0; logf="$(mktemp)"; t0=$SECONDS
+  docker build "$@" >"$logf" 2>&1 & pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    cur="$(grep -aoE '^Step [0-9]+/[0-9]+' "$logf" 2>/dev/null | tail -1)"
+    printf '\r\033[K  %s  (%ds)…' "${cur:-building}" "$((SECONDS-t0))"; sleep 1
+  done
+  wait "$pid" || rc=$?; printf '\r\033[K'
+  if [ "$rc" = 0 ]; then echo "  built in $((SECONDS-t0))s ✓"
+  else echo "  build FAILED (exit $rc) — last lines:"; tail -25 "$logf"; fi
+  rm -f "$logf"; return "$rc"
+}
 
 # Workspace location: flag/env, else prompt, else default. The .workstation dir lives inside it.
 if [ -z "$WS_HOME" ]; then
@@ -111,7 +126,7 @@ WS_PLUGINS="$(printf '%s' "$WS_PLUGINS" | tr ',' ' ' | tr -s ' ' | sed 's/^ *//;
 log "docker image 'workstation' (build if missing or plugins changed)"
 prev_plugins="$(cat "$WS_DIR/.plugins" 2>/dev/null || true)"
 if ! dock image inspect workstation >/dev/null 2>&1 || [ "$WS_PLUGINS" != "$prev_plugins" ]; then
-  dock build --build-arg "WS_LANG=$WS_LANG" --build-arg "WS_PLUGINS=$WS_PLUGINS" -t workstation "$REPO_DIR"
+  build_quiet --build-arg "WS_LANG=$WS_LANG" --build-arg "WS_PLUGINS=$WS_PLUGINS" -t workstation "$REPO_DIR" || { echo "⚠ image build failed — see above."; exit 1; }
   printf '%s' "$WS_PLUGINS" > "$WS_DIR/.plugins"
 else echo "  up to date ✓"; fi
 # host-side marker: if the image asked for audio (e.g. peon-ping), task.sh will pass the sound socket
