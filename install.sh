@@ -233,6 +233,14 @@ if [ "$IMPORT_PREFS" = 1 ] && [ -f "$HOME/.claude/settings.json" ]; then
   then _p="imported (Claude hooks kept)"; else _p="import failed — image defaults"; fi
   rm -f "$WS_DIR/.claude/host-settings.json"
   [ -f "$HOME/.config/gh/config.yml" ] && { mkdir -p "$WS_DIR/gh"; cp "$HOME/.config/gh/config.yml" "$WS_DIR/gh/config.yml"; _p="$_p + gh config"; }
+  # carry the host's onboarding + account state (from ~/.claude.json) so the container's Claude
+  # doesn't re-run its first-run wizard (theme/login). Curated keys only — no tokens.
+  if [ -f "$HOME/.claude.json" ]; then
+    cp "$HOME/.claude.json" "$WS_DIR/.claude/host-dot.json"
+    dock run --rm -v "$WS_DIR:/ws" workstation bash -lc \
+      'jq "{hasCompletedOnboarding,lastOnboardingVersion,oauthAccount,migrationVersion,tipsHistory,theme}|with_entries(select(.value!=null))" /ws/.claude/host-dot.json > /ws/.claude/claude-keys.json' >/dev/null 2>&1 && _p="$_p + onboarding"
+    rm -f "$WS_DIR/.claude/host-dot.json"
+  fi
   ck_set 2 done "$_p"
 else ck_set 2 done "skipped — image defaults"; fi
 

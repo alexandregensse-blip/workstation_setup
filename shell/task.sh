@@ -132,6 +132,14 @@ task() {
   [ -f "$ws_dir/.claude/statusline.sh" ]  && cfg_mounts+=(-v "$ws_dir/.claude/statusline.sh:/home/dev/.claude/statusline.sh:ro")
   [ -f "$ws_dir/gh/config.yml" ]          && cfg_mounts+=(-v "$ws_dir/gh/config.yml:/home/dev/.config/gh/config.yml:ro")
 
+  # imported host onboarding/account state (~/.claude.json keys): merge it into the container's
+  # writable ~/.claude.json at startup so Claude doesn't re-run its first-run wizard. Else just claude.
+  local -a claude_cmd=(claude)
+  if [ -f "$ws_dir/.claude/claude-keys.json" ]; then
+    cfg_mounts+=(-v "$ws_dir/.claude/claude-keys.json:/seed/claude-keys.json:ro")
+    claude_cmd=(bash -lc 'jq -s ".[0] * .[1]" "$HOME/.claude.json" /seed/claude-keys.json > /tmp/cj 2>/dev/null && mv /tmp/cj "$HOME/.claude.json"; exec claude')
+  fi
+
   # git identity for in-container commits (attribution only — name/email, no secret), from host git
   local gname gemail
   gname="$(git config --get user.name 2>/dev/null || true)"
@@ -159,7 +167,7 @@ task() {
     "${gitenv[@]}" \
     "${audio[@]}" \
     --memory=4g --cpus=2 \
-    workstation claude
+    workstation "${claude_cmd[@]}"
 
   echo "↩  Container disposed. Clone (on host): $dir"
   echo "   If 'git status' is clean AND 'git log @{u}..' is empty → rm -rf '$dir'"
