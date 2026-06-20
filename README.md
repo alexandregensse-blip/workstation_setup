@@ -59,7 +59,7 @@ else: no Claude/Serena/rtk/uv, no `~/.claude`.
 task <repo> [topic]              # start: repo fuzzy-matched to your gh repos; topic → timestamp if omitted
 task --here <repo> [topic]       # base = current directory
 task --at /path <repo> [topic]   # base = given path
-task resume                      # reopen existing task clones — pick some, each in a new terminal tab
+task resume                      # reopen existing task clones — pick some (fzf if installed, else numbers), each in a new tab
 task cleanup [-y]                # delete clones that are clean AND fully pushed (asks; -y skips the prompt)
 task auth                        # (re)login to Claude (stored in .workstation/.claude)
 task help                        # full help (also shown for: task with no args)
