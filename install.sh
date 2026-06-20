@@ -283,9 +283,8 @@ EOF
 [ "${group_added:-0}" = 1 ] && printf '\nDocker: works now via sudo. Log out/in once to use it without sudo (group '\''docker'\'').\n'
 cat <<EOF
 
-'task' was added to your ~/.bashrc. To use it in THIS shell right now, run:
-  source ~/.bashrc
-(or just open a new terminal — a piped installer can't load a shell function into its parent.)
+'task' is in your ~/.bashrc. If 'task' isn't found in this shell yet:  source ~/.bashrc
+(the README one-liner ends with '&& source ~/.bashrc', which already does this — else a new terminal.)
 
 To remove everything later (asks before each step):  $WS_DIR/uninstall.sh
 EOF
