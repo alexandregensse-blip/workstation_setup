@@ -111,17 +111,19 @@ Base: **Chainguard Wolfi** (`cgr.dev/chainguard/wolfi-base`) — a minimal, **gl
 Built in **two layers**: a heavy **`workstation-base`** (the toolchain, from `Dockerfile.base`)
 built **once and reused**, and the thin **`workstation`** (config + plugins, from `Dockerfile`,
 `FROM workstation-base`) rebuilt on changes — so changing plugins/language **never re-downloads the
-toolchain**. `update.sh` rebuilds the base (fresh tools) unless you pass `--fast`.
+toolchain**. `update.sh` rebuilds only what changed; `--fresh` forces a from-scratch base for the latest tools.
 
 ## Update
 
 ```bash
-<workspace>/.workstation/update.sh        # pull latest + rebuild (fresh Claude/Serena/rtk)
+<workspace>/.workstation/update.sh && source ~/.bashrc
 ```
 
-Pulls the repo and rebuilds the image (keeping your language + plugins). `--fast` reuses the Docker
-cache (applies repo changes only, without re-fetching the tools). `task` is sourced from the clone,
-so a new terminal picks up shell changes.
+Pulls the repo and rebuilds **only what changed** — the base if `Dockerfile.base` moved, the thin
+image if config/plugins moved, or **nothing** if only docs/scripts changed (no rebuild for nothing),
+keeping your language + plugins. `--fresh` forces a from-scratch base (`--pull --no-cache`) to fetch
+the latest Claude/Serena/rtk. The trailing `&& source ~/.bashrc` reloads `task` in your current
+shell if it changed — running the script is a child process, so it can't do that by itself.
 
 ## Uninstall
 
