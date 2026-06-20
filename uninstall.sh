@@ -16,6 +16,8 @@
 #   --dir  <path>  (WORKSTATION_DIR)   where the workstation lives  [auto-detected from ~/.bashrc, else ~/dev/.workstation]
 #   --home <path>  (WORKSTATION_HOME)  workspace root               [default ~/dev]
 #   --yes | -y                         assume yes to every prompt (non-interactive)
+# Execute this, don't source it (it uses set -e/exit). If sourced, bail out safely before set -e.
+if (return 0 2>/dev/null); then echo "Don't 'source' uninstall.sh — run it as a script." >&2; return 1; fi
 set -euo pipefail
 
 WS_DIR="${WORKSTATION_DIR:-}"

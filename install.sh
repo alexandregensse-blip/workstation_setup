@@ -22,6 +22,15 @@
 #   --import-prefs | --no-import-prefs   import this machine's Claude prefs (statusline/lang/theme)  [default: ask]
 #   --plug-ins <list> (WORKSTATION_PLUGINS) opt-in plugins, comma-separated keys (see plugins/available)  [default: prompt]
 #   --yes | -y                           non-interactive (skip prompts)
+
+# This must be EXECUTED (curl … | bash), not sourced: it uses `set -e`/`exit`, which would turn on
+# errexit in your interactive shell or close it. If sourced, bail out SAFELY (return, before set -e)
+# with instructions — a child process can't load the `task` function into your shell anyway.
+if (return 0 2>/dev/null); then
+  echo "Don't 'source' install.sh — run it:  curl -fsSL .../install.sh | bash" >&2
+  echo "When it finishes, load 'task' with:  source ~/.bashrc   (or open a new terminal)" >&2
+  return 1
+fi
 set -euo pipefail
 
 WS_HOME="${WORKSTATION_HOME:-}"
