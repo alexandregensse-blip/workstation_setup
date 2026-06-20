@@ -36,6 +36,7 @@ Launch flags — set these in your shell (or ~/.bashrc) and EVERY task starts th
   WORKSTATION_CLAUDE_MODE=auto     permission mode: auto | acceptEdits | bypassPermissions | default
   WORKSTATION_CLAUDE_MODEL=opus    model: an alias (opus/sonnet/…) or a full id
   WORKSTATION_CLAUDE_EFFORT=high   effort: low | medium | high | xhigh | max
+  WORKSTATION_DNS="1.1.1.1 8.8.8.8" use reliable DNS in the container (if the network's DNS is flaky)
 (The container is the sandbox, so 'auto'/'bypassPermissions' is reasonable there.)
 
 (Note: 'man task' won't work — task is a shell function, not a man page. Use 'task help'.)
@@ -184,6 +185,10 @@ _task_run(){
     [ -f "$HOME/.config/pulse/cookie" ] && audio+=(-v "$HOME/.config/pulse/cookie:/home/dev/.config/pulse/cookie:ro")
   fi
 
+  # optional reliable DNS in the container (set WORKSTATION_DNS="1.1.1.1 8.8.8.8" if the network's
+  # own DNS is flaky, e.g. a phone hotspot). Default: inherit the host resolver.
+  local -a dns=() d; for d in ${WORKSTATION_DNS:-}; do dns+=(--dns "$d"); done
+
   $dock run -it --rm \
     --name "task-$slug" \
     -v "$dir:/work" -w /work \
@@ -192,6 +197,7 @@ _task_run(){
     "${cfg_mounts[@]}" \
     "${gitenv[@]}" \
     "${audio[@]}" \
+    "${dns[@]}" \
     --memory=4g --cpus=2 \
     workstation "${claude_cmd[@]}"
 
