@@ -9,6 +9,7 @@
 /.plugins
 /.audio
 /.claude/
+/gh/
 
 # Safety net: never commit credentials / secrets.
 .credentials.json

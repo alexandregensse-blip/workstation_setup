@@ -104,10 +104,19 @@ task() {
   gh repo clone "$repo" "$dir" || return 1
   ( cd "$dir" && git switch -c "task/$slug" && git push -u origin "task/$slug" )
 
-  # optional per-machine config overrides (imported prefs / statusline), mounted over the baked ones
+  # optional per-machine config overrides (imported prefs / statusline / gh config), over the baked
   local -a cfg_mounts=()
   [ -f "$ws_dir/.claude/settings.json" ] && cfg_mounts+=(-v "$ws_dir/.claude/settings.json:/home/dev/.claude/settings.json:ro")
   [ -f "$ws_dir/.claude/statusline.sh" ]  && cfg_mounts+=(-v "$ws_dir/.claude/statusline.sh:/home/dev/.claude/statusline.sh:ro")
+  [ -f "$ws_dir/gh/config.yml" ]          && cfg_mounts+=(-v "$ws_dir/gh/config.yml:/home/dev/.config/gh/config.yml:ro")
+
+  # git identity for in-container commits (attribution only — name/email, no secret), from host git
+  local gname gemail
+  gname="$(git config --get user.name 2>/dev/null || true)"
+  gemail="$(git config --get user.email 2>/dev/null || true)"
+  local -a gitenv=()
+  [ -n "$gname" ]  && gitenv+=(-e "GIT_AUTHOR_NAME=$gname"   -e "GIT_COMMITTER_NAME=$gname")
+  [ -n "$gemail" ] && gitenv+=(-e "GIT_AUTHOR_EMAIL=$gemail" -e "GIT_COMMITTER_EMAIL=$gemail")
 
   # audio passthrough for sound plugins (e.g. peon-ping): only if the image asked for it AND a
   # host audio server is present — degrades to silent otherwise (e.g. headless). uid 1000 matches.
@@ -125,6 +134,7 @@ task() {
     -e GH_TOKEN="$gh_token" \
     "${claude_auth[@]}" \
     "${cfg_mounts[@]}" \
+    "${gitenv[@]}" \
     "${audio[@]}" \
     --memory=4g --cpus=2 \
     workstation claude

@@ -126,7 +126,7 @@ else
   if [ -z "$do_import" ]; then
     if [ "$ASSUME_YES" = 1 ]; then do_import=0
     elif [ -r /dev/tty ]; then
-      printf '  Import your local Claude preferences (statusline, language, theme…)? [Y/n]: '
+      printf '  Import your local Claude + gh preferences (statusline, language, theme, gh config)? [Y/n]: '
       read -r a < /dev/tty || a=y; case "$a" in n|N|no|NO) do_import=0 ;; *) do_import=1 ;; esac
     else do_import=0; fi
   fi
@@ -139,6 +139,10 @@ else
       && echo "  imported ✓ (workstation hooks kept; host permissions/plugins not imported)" \
       || echo "  import failed — using image defaults"
     rm -f "$WS_DIR/.claude/host-settings.json"
+    # gh CLI prefs (aliases/editor/git_protocol) — NOT hosts.yml (that holds the token; we use GH_TOKEN)
+    [ -f "$HOME/.config/gh/config.yml" ] && { mkdir -p "$WS_DIR/gh"; cp "$HOME/.config/gh/config.yml" "$WS_DIR/gh/config.yml"; echo "  imported gh config ✓"; }
+    # git identity (name/email) is passed per-run by 'task' via env — no secret, always attributed.
+    # Commit SIGNING is intentionally left to the broker (keys never enter task containers); see DESIGN.
   else echo "  skipped — using image defaults"; fi
 fi
 
