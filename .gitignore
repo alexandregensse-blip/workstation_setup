@@ -6,6 +6,8 @@
 # Runtime state written into the clone at install time (never commit).
 /.apt-installed
 /.docker-group-added
+/.plugins
+/.audio
 /.claude/
 
 # Safety net: never commit credentials / secrets.

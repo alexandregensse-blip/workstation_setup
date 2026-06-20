@@ -18,6 +18,7 @@
 #   --dir   <path>  (WORKSTATION_DIR)    where the workstation lives    [default <home>/.workstation]
 #   --lang  <code>  (WORKSTATION_LANG)   Claude UI language (image)     [default: unset / Claude default]
 #   --import-prefs | --no-import-prefs   import this machine's Claude prefs (statusline/lang/theme)  [default: ask]
+#   --plug-ins <list> (WORKSTATION_PLUGINS) opt-in plugins, comma-separated keys (see plugins/available)  [default: prompt]
 #   --yes | -y                           non-interactive (skip prompt)
 # Re-running installs/configures only what is missing. No machine-specific absolute paths.
 set -euo pipefail
@@ -27,6 +28,7 @@ WS_REPOS="${WORKSTATION_REPOS:-}"
 WS_DIR="${WORKSTATION_DIR:-}"
 WS_LANG="${WORKSTATION_LANG:-}"
 IMPORT_PREFS="${WORKSTATION_IMPORT_PREFS:-}"   # ""=ask, 1=yes, 0=no
+WS_PLUGINS="${WORKSTATION_PLUGINS:-}"          # space/comma-separated plugin keys ("" = prompt)
 ASSUME_YES=0
 WS_URL="https://github.com/alexandregensse-blip/workstation_setup"
 
@@ -38,8 +40,9 @@ while [ $# -gt 0 ]; do
     --lang)   WS_LANG="${2:?--lang requires a code}";   shift 2 ;;
     --import-prefs)    IMPORT_PREFS=1; shift ;;
     --no-import-prefs) IMPORT_PREFS=0; shift ;;
+    --plug-ins) WS_PLUGINS="${2:?--plug-ins requires a comma-separated list}"; shift 2 ;;
     -y|--yes) ASSUME_YES=1; shift ;;
-    *) echo "unknown flag: $1  (use --home/--repos/--dir/--lang/--import-prefs/--no-import-prefs/--yes)"; exit 1 ;;
+    *) echo "unknown flag: $1  (use --home/--repos/--dir/--lang/--import-prefs/--no-import-prefs/--plug-ins/--yes)"; exit 1 ;;
   esac
 done
 
@@ -92,8 +95,27 @@ group_added=0
 if getent group docker | grep -qw "$(id -un)"; then echo "  already a member ✓"
 else sudo usermod -aG docker "$USER"; : > "$WS_DIR/.docker-group-added"; group_added=1; fi
 
-log "docker image 'workstation' (build if missing)"
-dock image inspect workstation >/dev/null 2>&1 || dock build --build-arg "WS_LANG=$WS_LANG" -t workstation "$REPO_DIR"
+log "plugins (opt-in — baked into the image on demand)"
+if [ -z "$WS_PLUGINS" ] && [ "$ASSUME_YES" = 0 ] && [ -r /dev/tty ] && [ -f "$REPO_DIR/plugins/available" ]; then
+  sel=""
+  while IFS=$'\t' read -r pkey pdesc; do
+    case "$pkey" in ''|'#'*) continue ;; esac
+    printf '  Enable "%s" — %s? [y/N]: ' "$pkey" "$pdesc"
+    read -r a < /dev/tty || a=n; case "$a" in y|Y|yes|YES) sel="$sel $pkey" ;; esac
+  done < "$REPO_DIR/plugins/available"
+  WS_PLUGINS="$sel"
+fi
+WS_PLUGINS="$(printf '%s' "$WS_PLUGINS" | tr ',' ' ' | tr -s ' ' | sed 's/^ *//;s/ *$//')"
+[ -n "$WS_PLUGINS" ] && echo "  selected: $WS_PLUGINS" || echo "  none"
+
+log "docker image 'workstation' (build if missing or plugins changed)"
+prev_plugins="$(cat "$WS_DIR/.plugins" 2>/dev/null || true)"
+if ! dock image inspect workstation >/dev/null 2>&1 || [ "$WS_PLUGINS" != "$prev_plugins" ]; then
+  dock build --build-arg "WS_LANG=$WS_LANG" --build-arg "WS_PLUGINS=$WS_PLUGINS" -t workstation "$REPO_DIR"
+  printf '%s' "$WS_PLUGINS" > "$WS_DIR/.plugins"
+else echo "  up to date ✓"; fi
+# host-side marker: if the image asked for audio (e.g. peon-ping), task.sh will pass the sound socket
+if dock run --rm workstation test -f /home/dev/.claude/.audio-needed >/dev/null 2>&1; then : > "$WS_DIR/.audio"; else rm -f "$WS_DIR/.audio"; fi
 
 log "Claude preferences (optional import from this machine — host is only read)"
 mkdir -p "$WS_DIR/.claude"

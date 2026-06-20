@@ -69,7 +69,17 @@ The prompt and `sudo` read from `/dev/tty`, so the pipe form stays interactive.
 | `--dir <path>`   | `WORKSTATION_DIR`   | where the workstation lives | `<home>/.workstation` |
 | `--lang <code>`  | `WORKSTATION_LANG`  | Claude UI language (baked in the image) | unset (Claude default) |
 | `--import-prefs` / `--no-import-prefs` | `WORKSTATION_IMPORT_PREFS` | import this machine's Claude prefs (statusline/lang/theme) | ask if a local Claude is found |
+| `--plug-ins <list>` | `WORKSTATION_PLUGINS` | opt-in plugins, comma-separated keys | prompt per known plugin |
 | `--yes` / `-y`   | —                   | non-interactive (skip prompt) | — |
+
+**Plugins (opt-in, baked on demand).** `plugins/available` lists selectable plugins; install offers
+each (or takes `--plug-ins`). The chosen keys go to the build as `--build-arg WS_PLUGINS`, and the
+Dockerfile runs `plugins/install-plugin.sh sysdeps|user <key>` for each — so the default image is
+unchanged and one plugin can't break the build (each call is non-fatal). The selection is recorded
+in `.workstation/.plugins` (rebuild on change). If a plugin wants host audio it drops a marker in
+the image; install mirrors it to `.workstation/.audio`, and `task` then passes the PulseAudio/PipeWire
+socket through (uid 1000 matches; silent if the host has no audio server). First plugin: **peon-ping**
+(notification sounds + `ffmpeg`, hooks merged with Serena/rtk).
 
 Missing flag values fail fast with a clear message (guarded against `set -u`).
 

@@ -34,6 +34,7 @@ curl -fsSL .../install.sh | bash -s -- --home ~/dev --yes
 | `--dir`   / `WORKSTATION_DIR`   | where the workstation lives | `<home>/.workstation` |
 | `--lang`  / `WORKSTATION_LANG`  | Claude UI language (baked in the image) | unset (Claude default) |
 | `--import-prefs` / `--no-import-prefs` | import this machine's Claude prefs (statusline/lang/theme) | ask if a local Claude is found |
+| `--plug-ins` / `WORKSTATION_PLUGINS` | opt-in plugins, comma-separated keys (see `plugins/available`) | prompt per known plugin |
 | `--yes` / `-y` | non-interactive (skip the prompt) | — |
 
 ## Dependencies
@@ -82,6 +83,20 @@ If a Claude install is found on the machine, install offers to **import your loc
 (host `permissions`/`enabledPlugins` are dropped) into `<workspace>/.workstation/.claude/` and
 mounts them read-only into task containers — the host `~/.claude` is only read. Force with
 `--import-prefs` / `--no-import-prefs`.
+
+## Plugins (opt-in)
+
+Extra capabilities are **baked into the image only when you ask for them** — the default image is
+unchanged. Pick them with `--plug-ins peon-ping[,…]`, or answer the per-plugin prompt at install.
+Known plugins live in `plugins/available`; each is installed by `plugins/install-plugin.sh` (add a
+line + a case to extend). Selected plugins are recorded in `<workspace>/.workstation/.plugins`, and
+the image is rebuilt when the selection changes.
+
+- **peon-ping** — Warcraft "peon" sounds when Claude finishes / needs you. Installs its official
+  way (downloads only the default sound packs, not the whole repo), merged alongside the Serena/rtk
+  hooks. It adds `ffmpeg` to the image (≈ +90 MB, **only** when enabled) and makes `task` pass the
+  host audio socket through (PulseAudio/PipeWire), so the sound plays on your speakers; silent if
+  the host has no audio server.
 
 ## Image
 

@@ -85,12 +85,23 @@ task() {
   [ -f "$ws_dir/.claude/settings.json" ] && cfg_mounts+=(-v "$ws_dir/.claude/settings.json:/home/dev/.claude/settings.json:ro")
   [ -f "$ws_dir/.claude/statusline.sh" ]  && cfg_mounts+=(-v "$ws_dir/.claude/statusline.sh:/home/dev/.claude/statusline.sh:ro")
 
+  # audio passthrough for sound plugins (e.g. peon-ping): only if the image asked for it AND a
+  # host audio server is present — degrades to silent otherwise (e.g. headless). uid 1000 matches.
+  local xdg="/run/user/$(id -u)"
+  local -a audio=()
+  if [ -f "$ws_dir/.audio" ] && [ -S "$xdg/pulse/native" ]; then
+    audio=(-e "XDG_RUNTIME_DIR=$xdg" -e "PULSE_SERVER=unix:$xdg/pulse/native" \
+           -v "$xdg/pulse/native:$xdg/pulse/native")
+    [ -f "$HOME/.config/pulse/cookie" ] && audio+=(-v "$HOME/.config/pulse/cookie:/home/dev/.config/pulse/cookie:ro")
+  fi
+
   $dock run -it --rm \
     --name "task-$slug" \
     -v "$dir:/work" -w /work \
     -e GH_TOKEN="$gh_token" \
     "${claude_auth[@]}" \
     "${cfg_mounts[@]}" \
+    "${audio[@]}" \
     --memory=4g --cpus=2 \
     workstation claude
 

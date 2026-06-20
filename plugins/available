@@ -1,0 +1,4 @@
+# Known opt-in plugins, offered by install.sh and installed into the image on demand.
+# Format:  <key><TAB><one-line description>     (lines starting with # are ignored)
+# Add a line here AND a matching case in install-plugin.sh to make a new plugin selectable.
+peon-ping	Warcraft peon sounds when Claude finishes / needs you (audio)
