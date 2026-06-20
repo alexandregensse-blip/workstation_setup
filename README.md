@@ -16,8 +16,15 @@ curl -fsSL https://raw.githubusercontent.com/alexandregensse-blip/workstation_se
 
 It asks where to put your workspace (current dir / `~/dev` / custom), installs **only the missing**
 host prerequisites (`docker`, `git`, `gh`), clones itself into `<workspace>/.workstation`, **builds
-the Docker image** (which bakes Claude/Serena/rtk + hooks + your dotfiles), **auto-sources `task`**
-into your `.bashrc`, runs GitHub + Claude auth, and prints a confirmation.
+the Docker image** (which bakes Claude/Serena/rtk + hooks + your dotfiles), adds `task` to your
+`.bashrc`, runs GitHub + Claude auth, and prints a confirmation.
+
+**After install, load `task` into your shell** — a piped installer can't do it for you (it runs in a
+child process):
+
+```bash
+source ~/.bashrc      # …or just open a new terminal
+```
 
 > The prompt and `sudo` read from `/dev/tty`, so the pipe form stays interactive.
 
