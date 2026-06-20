@@ -1,10 +1,12 @@
 # workstation_setup
 
-Portable workstation. On a fresh machine (Ubuntu), **one command** installs every tool, configures
-Claude Code (**Serena** MCP + rtk), sets up Docker, and adds the `task` command for **isolated
-sessions**. No machine-specific absolute paths (everything is `$HOME`-relative).
+Portable workstation. On a fresh machine (Ubuntu), **one command** sets up Claude Code work as
+**isolated Docker sessions** and adds the `task` command. **Container-only**: the whole AI toolchain
+(Claude Code, Serena MCP, rtk, uv) and all config live inside the image and a self-contained
+`<workspace>/.workstation` dir — **the host is left in its initial state** (only docker + git + gh,
+installed if missing). No machine-specific absolute paths.
 
-> Full design & every behavior: **[DESIGN.md](DESIGN.md)**. Serena + rtk hooks are configured automatically.
+> Full design & every behavior: **[DESIGN.md](DESIGN.md)**.
 
 ## Install — one command
 
@@ -12,10 +14,10 @@ sessions**. No machine-specific absolute paths (everything is `$HOME`-relative).
 curl -fsSL https://raw.githubusercontent.com/alexandregensse-blip/workstation_setup/main/install.sh | bash
 ```
 
-It asks where to put your workspace (current dir / `~/dev` / custom), elevates with `sudo`, installs
-**only what's missing**, clones itself into a **hidden dir** (`~/.local/share/workstation`), installs
-uv/Claude/Serena/rtk, deploys your dotfiles, **builds the Docker image**, **auto-sources `task`** into
-your `.bashrc`, runs GitHub + Claude auth, and prints a confirmation.
+It asks where to put your workspace (current dir / `~/dev` / custom), installs **only the missing**
+host prerequisites (`docker`, `git`, `gh`), clones itself into `<workspace>/.workstation`, **builds
+the Docker image** (which bakes Claude/Serena/rtk + hooks + your dotfiles), **auto-sources `task`**
+into your `.bashrc`, runs GitHub + Claude auth, and prints a confirmation.
 
 > The prompt and `sudo` read from `/dev/tty`, so the pipe form stays interactive.
 
@@ -27,38 +29,47 @@ curl -fsSL .../install.sh | bash -s -- --home ~/dev --yes
 
 | Flag / env | Meaning | Default |
 |---|---|---|
-| `--home`  / `WORKSTATION_HOME`  | workspace dir for task clones | prompt, else `~/dev` |
+| `--home`  / `WORKSTATION_HOME`  | workspace dir (clones + `.workstation`) | prompt, else `~/dev` |
 | `--repos` / `WORKSTATION_REPOS` | tasks base | `<home>/repos` |
-| `--dir`   / `WORKSTATION_DIR`   | where the workstation lives | `~/.local/share/workstation` (hidden) |
-| `--lang`  / `WORKSTATION_LANG`  | Claude UI language | keep host pref, else system default |
+| `--dir`   / `WORKSTATION_DIR`   | where the workstation lives | `<home>/.workstation` |
+| `--lang`  / `WORKSTATION_LANG`  | Claude UI language (baked in the image) | unset (Claude default) |
 | `--yes` / `-y` | non-interactive (skip the prompt) | — |
 
 ## Dependencies
 
 **Prerequisites** (before the one-liner): Debian/Ubuntu, `sudo`, internet, and `bash` + `curl`.
 
-**Installed on the host** by `install.sh` (only what's missing):
-- via `apt`: `curl`, `git`, `ripgrep`, `gh`, `nodejs`, `npm`, `docker.io`, `jq`
-- via their own installers: `uv`, Claude Code, **Serena** (`serena-agent`, through uv), **rtk**
+**Installed on the host** by `install.sh` — only what's missing, and **only these three** (recorded
+so `uninstall.sh` can offer to remove exactly them): `docker.io`, `git`, `gh`. The host gets nothing
+else: no Claude/Serena/rtk/uv, no `~/.claude`.
 
 **Inside the Docker image** (Wolfi / `apk`): `bash`, `curl`, `git`, `ripgrep`, `python3`, `gh`, `jq`,
-`shadow`, `ca-certificates`, plus `uv`, Claude Code, Serena, rtk.
+`shadow`, `ca-certificates`, plus `uv`, Claude Code, **Serena**, **rtk** — and the baked config
+(settings + Serena/rtk hooks + policy + statusline).
 
 ## Work
 
-- **On the host**: `claude` from your workspace.
-- **Isolated** (recommended):
-  ```bash
-  task <repo> <topic>              # default base
-  task --here <repo> <topic>       # base = current directory
-  task --at /path <repo> <topic>   # base = given path
-  ```
-  Clones on the host, branches `task/<slug>`, then runs Claude in a **disposable container** (Serena
-  connected, auth reused). On exit: container destroyed, clone kept on the host.
+```bash
+task <repo> <topic>              # default base
+task --here <repo> <topic>       # base = current directory
+task --at /path <repo> <topic>   # base = given path
+task auth                        # (re)login to Claude (stored in .workstation/.claude)
+```
+
+Clones on the host, branches `task/<slug>`, then runs Claude in a **disposable container** (Serena
+connected, auth mounted). On exit: container destroyed, clone kept on the host.
 
 > **Pattern C / model A**: everything Claude does stays in the container. The image uses a `dev` user
 > with **uid 1000** so host-mounted files (clone, credentials) are readable. Docker **auto-falls back
 > to `sudo`** until the `docker` group is active (next login) — so it works right away.
+
+## Auth
+
+- **GitHub** — host `gh` login (`gh auth token` passed to the container; a baked credential helper
+  lets in-container `git push` use it).
+- **Claude** — `task auth` logs in **inside a container** and stores the credentials in
+  `<workspace>/.workstation/.claude/.credentials.json` (mounted read-only into task containers).
+  `~/.claude` on the host is never created. Headless: set `CLAUDE_CODE_OAUTH_TOKEN` instead.
 
 ## Image
 
@@ -69,7 +80,17 @@ Base: **Chainguard Wolfi** (`cgr.dev/chainguard/wolfi-base`) — a minimal, **gl
 ## Update
 
 ```bash
-git -C ~/.local/share/workstation pull
-uv tool upgrade serena-agent
-docker build -t workstation ~/.local/share/workstation
+git -C <workspace>/.workstation pull
+docker build -t workstation <workspace>/.workstation
 ```
+
+## Uninstall
+
+```bash
+<workspace>/.workstation/uninstall.sh        # asks before each step
+```
+
+Removes, **one confirmation at a time**: the `task` block in `.bashrc`, the Docker image, the apt
+packages it installed (`docker`/`git`/`gh` — only those, read from a manifest), your docker-group
+membership (only if it added you), and the `.workstation` dir (clone + Claude credentials). **Your
+task clones are kept**, and nothing else on the host was ever touched. `--yes` for non-interactive.

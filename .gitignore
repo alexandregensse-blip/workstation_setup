@@ -3,6 +3,11 @@
 *.log
 .DS_Store
 
+# Runtime state written into the clone at install time (never commit).
+/.apt-installed
+/.docker-group-added
+/.claude/
+
 # Safety net: never commit credentials / secrets.
 .credentials.json
 *.pem

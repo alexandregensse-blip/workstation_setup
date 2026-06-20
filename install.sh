@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
-# workstation_setup — single, idempotent installer (Ubuntu host).
+# workstation_setup — single, idempotent installer. CONTAINER-ONLY model:
+# the host is left in its initial state as much as possible. The whole AI toolchain
+# (Claude Code, Serena, rtk, uv, python, ripgrep) and all config (~/.claude, hooks)
+# live ONLY inside the Docker image and the self-contained <workspace>/.workstation dir.
+# The host gets just: docker + git + gh (installed only if missing, and recorded so
+# uninstall.sh can offer to remove exactly those), plus the `task` command in ~/.bashrc.
 #
 # New machine, ONE command:
 #   curl -fsSL https://raw.githubusercontent.com/alexandregensse-blip/workstation_setup/main/install.sh | bash
@@ -10,15 +15,15 @@
 # Flags / env (all optional):
 #   --home  <path>  (WORKSTATION_HOME)   workspace dir for task clones  [prompt; default ~/dev]
 #   --repos <path>  (WORKSTATION_REPOS)  tasks base                     [default <home>/repos]
-#   --dir   <path>  (WORKSTATION_DIR)    where the workstation lives    [default ~/.local/share/workstation, hidden]
-#   --lang  <code>  (WORKSTATION_LANG)   Claude UI language             [default: keep host pref, else system default]
+#   --dir   <path>  (WORKSTATION_DIR)    where the workstation lives    [default <home>/.workstation]
+#   --lang  <code>  (WORKSTATION_LANG)   Claude UI language (image)     [default: unset / Claude default]
 #   --yes | -y                           non-interactive (skip prompt)
-# Re-installs/configures only what is missing. No machine-specific absolute paths ($HOME-relative).
+# Re-running installs/configures only what is missing. No machine-specific absolute paths.
 set -euo pipefail
 
-WS_DIR="${WORKSTATION_DIR:-$HOME/.local/share/workstation}"
 WS_HOME="${WORKSTATION_HOME:-}"
 WS_REPOS="${WORKSTATION_REPOS:-}"
+WS_DIR="${WORKSTATION_DIR:-}"
 WS_LANG="${WORKSTATION_LANG:-}"
 ASSUME_YES=0
 WS_URL="https://github.com/alexandregensse-blip/workstation_setup"
@@ -38,12 +43,15 @@ log(){  printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
 have(){ command -v "$1" >/dev/null 2>&1; }
 # docker that works WITH or WITHOUT the docker group (auto-falls back to sudo)
 dock(){ if docker info >/dev/null 2>&1; then docker "$@"; else sudo docker "$@"; fi; }
-export PATH="$HOME/.local/bin:$PATH"
+# fixed-width box, padded by character count (UTF-8) so the right edge never overflows
+banner(){ local msg="  ✓  $1" w=46 line='' pad; while [ "${#line}" -lt "$w" ]; do line+='═'; done
+  pad=$(( w - ${#msg} )); [ "$pad" -lt 0 ] && pad=0
+  printf '╔%s╗\n║%s%*s║\n╚%s╝\n' "$line" "$msg" "$pad" '' "$line"; }
 
-# Workspace location: flag/env, else prompt, else default
+# Workspace location: flag/env, else prompt, else default. The .workstation dir lives inside it.
 if [ -z "$WS_HOME" ]; then
   if [ "$ASSUME_YES" = 0 ] && [ -r /dev/tty ]; then
-    printf '\nWhere do you want your workspace (task clones)?\n'
+    printf '\nWhere do you want your workspace (task clones + the .workstation dir)?\n'
     printf '  1) %s   (default)\n  2) current directory: %s\n  3) another path\n' "$HOME/dev" "$PWD"
     printf 'Choice [1/2/3]: '
     read -r _ch < /dev/tty || _ch=1
@@ -54,95 +62,84 @@ if [ -z "$WS_HOME" ]; then
     esac
   else WS_HOME="$HOME/dev"; fi
 fi
+WS_DIR="${WS_DIR:-$WS_HOME/.workstation}"
 WS_REPOS="${WS_REPOS:-$WS_HOME/repos}"
 
 log "sudo"
 sudo -v
 
-log "system packages (install only what's missing)"
+log "host prerequisites: docker, git, gh (install only what's missing)"
 need=""
-for pair in curl:curl git:git ripgrep:rg gh:gh nodejs:node npm:npm docker.io:docker jq:jq; do
+for pair in docker.io:docker git:git gh:gh; do
   have "${pair#*:}" || need="$need ${pair%:*}"
 done
+mkdir -p "$WS_HOME" "$WS_REPOS"
 if [ -n "$need" ]; then sudo apt update && sudo apt install -y $need; else echo "  all present ✓"; fi
 
-# Self-bootstrap: if not already inside a clone, fetch the repo into the hidden dir
-_src="${BASH_SOURCE[0]:-}"
-if [ -n "$_src" ] && [ -d "$(dirname "$_src")/claude" ]; then
-  REPO_DIR="$(cd "$(dirname "$_src")" && pwd)"
-else
-  log "fetching workstation into $WS_DIR"
-  if [ -d "$WS_DIR/.git" ]; then git -C "$WS_DIR" pull --ff-only; else git clone "$WS_URL" "$WS_DIR"; fi
-  REPO_DIR="$WS_DIR"
-fi
-
-log "uv";     have uv     || curl -LsSf https://astral.sh/uv/install.sh | sh
-export PATH="$HOME/.local/bin:$PATH"
-log "claude"; have claude || curl -fsSL https://claude.ai/install.sh | bash
-log "serena"; have serena || uv tool install -p 3.13 serena-agent
-serena init >/dev/null 2>&1 || true
-log "rtk";    have rtk    || curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh
-
-log "dotfiles + workspace + task command (auto-sourced)"
-# Claude UI language: --lang flag > existing host preference > unset (system default).
-ws_lang="$WS_LANG"
-if [ -z "$ws_lang" ] && [ -f "$HOME/.claude/settings.json" ]; then
-  ws_lang="$(jq -r '.language // empty' "$HOME/.claude/settings.json" 2>/dev/null || true)"
-fi
-mkdir -p "$HOME/.claude" "$WS_HOME" "$WS_REPOS" "$HOME/.local/share/workstation-shell"
-cp "$REPO_DIR/claude/CLAUDE.md"     "$HOME/.claude/CLAUDE.md"
-cp "$REPO_DIR/claude/CLAUDE.md"     "$WS_HOME/AGENTS.md"
-cp "$REPO_DIR/claude/settings.json" "$HOME/.claude/settings.json"
-cp "$REPO_DIR/claude/statusline.sh" "$HOME/.claude/statusline.sh"
-cp "$REPO_DIR/dev/CLAUDE.md"        "$WS_HOME/CLAUDE.md"
-cp "$REPO_DIR/shell/task.sh"        "$HOME/.local/share/workstation-shell/task.sh"
-chmod +x "$HOME/.claude/statusline.sh"
-# keep the language preference (flag / existing host), else leave it unset = system default
-if [ -n "$ws_lang" ]; then
-  tmp="$(mktemp)"; jq --arg l "$ws_lang" '.language=$l' "$HOME/.claude/settings.json" > "$tmp" && mv "$tmp" "$HOME/.claude/settings.json"
-fi
-if ! grep -q 'workstation-shell/task.sh' "$HOME/.bashrc" 2>/dev/null; then
-  { [ "$WS_REPOS" != "$HOME/dev/repos" ] && echo "export WORKSTATION_REPOS=\"$WS_REPOS\""
-    echo 'source "$HOME/.local/share/workstation-shell/task.sh"'; } >> "$HOME/.bashrc"
-fi
-
-log "Serena MCP (skip if already registered)"
-claude mcp list 2>/dev/null | grep -q '^serena' || serena setup claude-code
-
-log "rtk RTK.md/@RTK.md — hooks already declared in settings.json (skip if done)"
-[ -f "$HOME/.claude/RTK.md" ] || rtk init -g --no-patch
+log "fetch workstation into $WS_DIR (self-contained, inside your workspace)"
+if [ -d "$WS_DIR/.git" ]; then git -C "$WS_DIR" pull --ff-only || true
+else git clone "$WS_URL" "$WS_DIR"; fi
+REPO_DIR="$WS_DIR"
+# record what WE apt-installed, INSIDE the workstation dir (uninstall reads it, point-by-point)
+[ -n "$need" ] && printf '%s\n' $need >> "$WS_DIR/.apt-installed"
 
 log "docker group (skip if already a member)"
-getent group docker | grep -qw "$(id -un)" || sudo usermod -aG docker "$USER"
+if getent group docker | grep -qw "$(id -un)"; then echo "  already a member ✓"
+else sudo usermod -aG docker "$USER"; : > "$WS_DIR/.docker-group-added"; fi
 
 log "docker image 'workstation' (build if missing)"
-dock image inspect workstation >/dev/null 2>&1 || dock build --build-arg "WS_LANG=$ws_lang" -t workstation "$REPO_DIR"
+dock image inspect workstation >/dev/null 2>&1 || dock build --build-arg "WS_LANG=$WS_LANG" -t workstation "$REPO_DIR"
 
-log "authentication (env tokens if present, else browser)"
-gh auth status     >/dev/null 2>&1 || gh auth login --web --git-protocol https
-claude auth status >/dev/null 2>&1 || claude auth login
+log "task command (auto-sourced in ~/.bashrc, removable block)"
+if ! grep -q '# >>> workstation >>>' "$HOME/.bashrc" 2>/dev/null; then
+  { echo '# >>> workstation >>>'
+    echo "export WORKSTATION_DIR=\"$WS_DIR\""
+    echo "export WORKSTATION_REPOS=\"$WS_REPOS\""
+    echo "source \"$WS_DIR/shell/task.sh\""
+    echo '# <<< workstation <<<'; } >> "$HOME/.bashrc"
+fi
+
+log "GitHub auth (browser, only if needed)"
+if gh auth status >/dev/null 2>&1; then echo "  already authenticated ✓"
+elif [ -r /dev/tty ]; then gh auth login --web --git-protocol https < /dev/tty || true
+else echo "  no TTY — run 'gh auth login' later."; fi
+
+log "Claude credentials (stored in $WS_DIR/.claude — host ~/.claude untouched)"
+mkdir -p "$WS_DIR/.claude"
+if [ -f "$WS_DIR/.claude/.credentials.json" ]; then echo "  already present ✓"
+elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then echo "  CLAUDE_CODE_OAUTH_TOKEN set — no stored file needed ✓"
+elif [ -r /dev/tty ]; then
+  echo "  one-time login inside a container (a URL/code will be shown — open it to authorize):"
+  dock run -it --rm -v "$WS_DIR/.claude:/seed" workstation \
+    bash -lc 'claude auth login && cp -f "$HOME/.claude/.credentials.json" /seed/.credentials.json' < /dev/tty \
+    || echo "  login skipped/failed — run 'task auth' later."
+else echo "  no TTY — run 'task auth' later (or set CLAUDE_CODE_OAUTH_TOKEN)."; fi
 
 log "Check"
 ok=1
-for c in uv claude serena rtk docker gh; do have "$c" && echo "  ✓ $c" || { echo "  ✗ $c MISSING"; ok=0; }; done
+for c in docker git gh; do have "$c" && echo "  ✓ $c" || { echo "  ✗ $c MISSING"; ok=0; }; done
 dock image inspect workstation >/dev/null 2>&1 && echo "  ✓ docker image 'workstation'" || { echo "  ✗ image missing"; ok=0; }
 
 echo
 if [ "$ok" = 1 ]; then
+banner "Workstation installed successfully"
 cat <<EOF
-╔══════════════════════════════════════════════╗
-║  ✅  Workstation installed successfully         ║
-╚══════════════════════════════════════════════╝
 
-Locations:  workstation: $WS_DIR   workspace: $WS_HOME   tasks: $WS_REPOS
+Host left clean: only docker + git + gh were touched. Everything else (Claude, Serena,
+rtk, all config) lives in the image and in:  $WS_DIR
+
+Locations:  workstation: $WS_DIR    workspace: $WS_HOME    tasks: $WS_REPOS
 
 task commands (isolated Claude session in a container):
   task <repo> <topic>                  → default base ($WS_REPOS)
   task --here <repo> <topic>           → base = current directory
   task --at <path> <repo> <topic>      → base = given path
+  task auth                            → (re)login to Claude (stored in .workstation/.claude)
   e.g.  task claude-autodev fix-login
 
 Docker works right away (via sudo until your next login). Log out/in once to drop the
 sudo prompt (group 'docker'). Open a new terminal so 'task' is available.
+
+To remove everything later (asks before each step):  $WS_DIR/uninstall.sh
 EOF
 else echo "⚠ Incomplete install — see the ✗ above."; exit 1; fi
