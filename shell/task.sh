@@ -17,9 +17,22 @@ task() {
   local ws_dir="${WORKSTATION_DIR:-${WORKSTATION_HOME:-$HOME/dev}/.workstation}"
   local dock; dock=docker; docker info >/dev/null 2>&1 || dock="sudo docker"
 
-  # one-off: (re)login to Claude inside the image, persisting creds to the workstation dir
+  # one-off: get Claude creds into the workstation dir — reuse an existing host login if present,
+  # else log in inside the image. Host ~/.claude is only read, never modified.
   if [ "${1:-}" = "auth" ]; then
     mkdir -p "$ws_dir/.claude"
+    if [ -f "$HOME/.claude/.credentials.json" ] && [ ! -f "$ws_dir/.claude/.credentials.json" ]; then
+      local acct a
+      acct="$(grep -oE '"emailAddress"[[:space:]]*:[[:space:]]*"[^"]+"' "$HOME/.claude.json" 2>/dev/null | head -1 | sed -E 's/.*"([^"]+)"$/\1/')"
+      [ -z "$acct" ] && acct="unknown account"
+      printf 'Reuse the Claude login already on this machine (account: %s)? [Y/n]: ' "$acct"
+      read -r a || a=y
+      case "$a" in n|N|no|NO) ;; *)
+        cp "$HOME/.claude/.credentials.json" "$ws_dir/.claude/.credentials.json"
+        chmod 600 "$ws_dir/.claude/.credentials.json"
+        echo "reused host credentials for $acct ✓"; return 0 ;;
+      esac
+    fi
     $dock run -it --rm -v "$ws_dir/.claude:/seed" workstation \
       bash -lc 'claude auth login && cp -f "$HOME/.claude/.credentials.json" /seed/.credentials.json'
     return $?

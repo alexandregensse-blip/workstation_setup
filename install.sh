@@ -84,8 +84,9 @@ REPO_DIR="$WS_DIR"
 [ -n "$need" ] && printf '%s\n' $need >> "$WS_DIR/.apt-installed"
 
 log "docker group (skip if already a member)"
+group_added=0
 if getent group docker | grep -qw "$(id -un)"; then echo "  already a member ✓"
-else sudo usermod -aG docker "$USER"; : > "$WS_DIR/.docker-group-added"; fi
+else sudo usermod -aG docker "$USER"; : > "$WS_DIR/.docker-group-added"; group_added=1; fi
 
 log "docker image 'workstation' (build if missing)"
 dock image inspect workstation >/dev/null 2>&1 || dock build --build-arg "WS_LANG=$WS_LANG" -t workstation "$REPO_DIR"
@@ -104,16 +105,34 @@ if gh auth status >/dev/null 2>&1; then echo "  already authenticated ✓"
 elif [ -r /dev/tty ]; then gh auth login --web --git-protocol https < /dev/tty || true
 else echo "  no TTY — run 'gh auth login' later."; fi
 
-log "Claude credentials (stored in $WS_DIR/.claude — host ~/.claude untouched)"
+log "Claude credentials (stored in $WS_DIR/.claude — host ~/.claude only read, never modified)"
 mkdir -p "$WS_DIR/.claude"
-if [ -f "$WS_DIR/.claude/.credentials.json" ]; then echo "  already present ✓"
-elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then echo "  CLAUDE_CODE_OAUTH_TOKEN set — no stored file needed ✓"
-elif [ -r /dev/tty ]; then
-  echo "  one-time login inside a container (a URL/code will be shown — open it to authorize):"
-  dock run -it --rm -v "$WS_DIR/.claude:/seed" workstation \
-    bash -lc 'claude auth login && cp -f "$HOME/.claude/.credentials.json" /seed/.credentials.json' < /dev/tty \
-    || echo "  login skipped/failed — run 'task auth' later."
-else echo "  no TTY — run 'task auth' later (or set CLAUDE_CODE_OAUTH_TOKEN)."; fi
+reused=0
+if [ -f "$WS_DIR/.claude/.credentials.json" ]; then echo "  already present ✓"; reused=1
+elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then echo "  CLAUDE_CODE_OAUTH_TOKEN set — no stored file needed ✓"; reused=1
+elif [ -f "$HOME/.claude/.credentials.json" ]; then
+  # a Claude login already exists on this machine — offer to reuse it (read-only copy)
+  acct="$(grep -oE '"emailAddress"[[:space:]]*:[[:space:]]*"[^"]+"' "$HOME/.claude.json" 2>/dev/null | head -1 | sed -E 's/.*"([^"]+)"$/\1/')"
+  [ -z "$acct" ] && acct="unknown account"
+  if [ "$ASSUME_YES" = 1 ]; then ans=y
+  elif [ -r /dev/tty ]; then printf '  Found a Claude login on this machine (account: %s).\n  Reuse it? [Y/n]: ' "$acct"; read -r ans < /dev/tty || ans=y
+  else ans=y; fi
+  case "${ans:-y}" in
+    n|N|no|NO) echo "  ok, will log in via browser instead." ;;
+    *) cp "$HOME/.claude/.credentials.json" "$WS_DIR/.claude/.credentials.json"
+       chmod 600 "$WS_DIR/.claude/.credentials.json"
+       echo "  reused host credentials for $acct ✓"; reused=1 ;;
+  esac
+fi
+if [ "$reused" = 0 ]; then
+  if [ -r /dev/tty ]; then
+    echo "  Logging into Claude inside a container — a URL/code will be printed; open it to authorize"
+    echo "  (the browser can't auto-open from inside the container):"
+    dock run -it --rm -v "$WS_DIR/.claude:/seed" workstation \
+      bash -lc 'claude auth login && cp -f "$HOME/.claude/.credentials.json" /seed/.credentials.json' < /dev/tty \
+      || echo "  login skipped/failed — run 'task auth' later."
+  else echo "  no TTY — run 'task auth' later (or set CLAUDE_CODE_OAUTH_TOKEN)."; fi
+fi
 
 log "Check"
 ok=1
@@ -125,21 +144,22 @@ if [ "$ok" = 1 ]; then
 banner "Workstation installed successfully"
 cat <<EOF
 
-Host left clean: only docker + git + gh were touched. Everything else (Claude, Serena,
-rtk, all config) lives in the image and in:  $WS_DIR
+Inside the container (the 'workstation' image):
+  Claude Code · Serena MCP · rtk (hooks pre-wired) · uv · git · gh · ripgrep · python3 · jq
 
-Locations:  workstation: $WS_DIR    workspace: $WS_HOME    tasks: $WS_REPOS
+Locations:  workstation: $WS_DIR    workspace: $WS_HOME    task clones: $WS_REPOS
 
 task commands (isolated Claude session in a container):
-  task <repo> <topic>                  → default base ($WS_REPOS)
+  task <repo> <topic>                  → clones into $WS_REPOS
   task --here <repo> <topic>           → base = current directory
   task --at <path> <repo> <topic>      → base = given path
   task auth                            → (re)login to Claude (stored in .workstation/.claude)
   e.g.  task claude-autodev fix-login
+EOF
+[ "${group_added:-0}" = 1 ] && printf '\nDocker: works now via sudo. Log out/in once to use it without sudo (group '\''docker'\'').\n'
+cat <<EOF
 
-Docker works right away (via sudo until your next login). Log out/in once to drop the
-sudo prompt (group 'docker'). Open a new terminal so 'task' is available.
-
+Open a new terminal so 'task' is available.
 To remove everything later (asks before each step):  $WS_DIR/uninstall.sh
 EOF
 else echo "⚠ Incomplete install — see the ✗ above."; exit 1; fi

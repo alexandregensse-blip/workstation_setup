@@ -142,10 +142,13 @@ Final image ≈ **194 MB**.
 
 - **GitHub** — host: gh keyring (or `GH_TOKEN`). Container: `GH_TOKEN="$(gh auth token)"`
   passed by `task`; the baked credential helper lets `git push` use it.
-- **Claude** — credentials live in `<workspace>/.workstation/.claude/.credentials.json`,
-  produced by `task auth` (login inside a container, copied out to that file) and mounted
-  read-only into task containers. The host `~/.claude` is never created. Headless alternative:
-  `CLAUDE_CODE_OAUTH_TOKEN` (generate once with `claude setup-token`).
+- **Claude** — credentials live in `<workspace>/.workstation/.claude/.credentials.json`, mounted
+  read-only into task containers. They are obtained by, in order: (1) **reusing an existing host
+  login** if `~/.claude/.credentials.json` is present — install/`task auth` show the account
+  (`emailAddress` read from `~/.claude.json`) and ask before copying it (the host file is only
+  read, never modified); (2) else a login **inside a container** (`task auth`), which prints a URL
+  to open — the browser can't auto-open from inside a container; (3) else `CLAUDE_CODE_OAUTH_TOKEN`
+  (generate once with `claude setup-token`). The host `~/.claude` is never written.
 - **Browser login can't be fully automated** (the "Authorize" click is the security boundary);
   the CLI prints a URL/code and zero-interaction is only possible with a pre-provisioned token.
 - **Docker group**: `usermod -aG docker` only takes effect on next login. Because `sg`/`newgrp`

@@ -67,9 +67,12 @@ connected, auth mounted). On exit: container destroyed, clone kept on the host.
 
 - **GitHub** — host `gh` login (`gh auth token` passed to the container; a baked credential helper
   lets in-container `git push` use it).
-- **Claude** — `task auth` logs in **inside a container** and stores the credentials in
-  `<workspace>/.workstation/.claude/.credentials.json` (mounted read-only into task containers).
-  `~/.claude` on the host is never created. Headless: set `CLAUDE_CODE_OAUTH_TOKEN` instead.
+- **Claude** — if you're **already logged into Claude on this machine**, install (and `task auth`)
+  detect it, show the account, and offer to **reuse the existing token** (host `~/.claude` is only
+  read, never modified). Otherwise `task auth` logs in **inside a container** (it prints a URL to
+  open — the browser can't auto-open from a container). Either way the credentials are stored in
+  `<workspace>/.workstation/.claude/.credentials.json` and mounted read-only into task containers.
+  Headless: set `CLAUDE_CODE_OAUTH_TOKEN` instead.
 
 ## Image
 
