@@ -81,18 +81,19 @@ ck_set(){                                    # ck_set <idx> <state> [detail]
     done)  [ -n "${CK_DETAIL[$1]:-}" ] && echo "  ${CK_DETAIL[$1]}" ;;
   esac; fi
 }
-human_rate(){  # bytes/sec → human-readable
-  local b="$1"
+human_rate(){ local b="$1"   # bytes/sec → human-readable
   if   [ "$b" -ge 1048576 ]; then awk -v b="$b" 'BEGIN{printf "%.1f MB/s", b/1048576}'
-  elif [ "$b" -ge 1024    ]; then echo "$((b/1024)) KB/s"
-  else echo "${b} B/s"; fi
-}
-# docker build whose checklist line <idx> shows the current Dockerfile step, the live host
-# download rate (most of it is the build's downloads), and elapsed seconds.
+  elif [ "$b" -ge 1024    ]; then echo "$((b/1024)) KB/s"; else echo "${b} B/s"; fi; }
+human_size(){ local b="$1"   # bytes → human-readable
+  if   [ "$b" -ge 1048576 ]; then awk -v b="$b" 'BEGIN{printf "%.0f MB", b/1048576}'
+  elif [ "$b" -ge 1024    ]; then echo "$((b/1024)) KB"; else echo "${b} B"; fi; }
+# docker build whose checklist line <idx> shows: current Dockerfile step, downloaded-so-far vs an
+# estimated total (<est> MB, ~ because the downloads are silent), live rate, and elapsed seconds.
+# 'downloaded' is the host's rx delta (mostly the build's traffic) — approximate.
 build_phase(){
-  local idx="$1"; shift
+  local idx="$1" est="$2"; shift 2
   if [ "$CK_TTY" != 1 ] || ! docker info >/dev/null 2>&1; then ck_dirty; dock build "$@"; return $?; fi
-  local logf t0 cur pid rc=0 iface rxf rx0 rx1 rate det
+  local logf t0 cur pid rc=0 iface rxf rx0 rx1 rate total=0 pct det
   logf="$(mktemp)"; t0=$SECONDS
   iface="$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'dev \K\S+' || true)"
   rxf="/sys/class/net/$iface/statistics/rx_bytes"
@@ -100,10 +101,14 @@ build_phase(){
   docker build "$@" >"$logf" 2>&1 & pid=$!
   while kill -0 "$pid" 2>/dev/null; do
     sleep 1
-    rx1="$(cat "$rxf" 2>/dev/null || echo 0)"; rate=$(( rx1 - rx0 )); [ "$rate" -lt 0 ] && rate=0; rx0="$rx1"
+    rx1="$(cat "$rxf" 2>/dev/null || echo 0)"; rate=$(( rx1 - rx0 )); [ "$rate" -lt 0 ] && rate=0
+    rx0="$rx1"; total=$(( total + rate ))
     cur="$(grep -aoE '^Step [0-9]+/[0-9]+' "$logf" 2>/dev/null | tail -1)"
-    if [ -r "$rxf" ]; then det="${cur:-building} · ↓ $(human_rate "$rate") · $((SECONDS-t0))s"
-    else det="${cur:-building} · $((SECONDS-t0))s"; fi
+    if [ ! -r "$rxf" ]; then det="${cur:-building} · $((SECONDS-t0))s"
+    elif [ "$est" -gt 0 ]; then
+      pct=$(( total / 1048576 * 100 / est )); [ "$pct" -gt 99 ] && pct=99
+      det="${cur:-building} · ↓ $(human_size "$total")/~${est}MB ${pct}% · $(human_rate "$rate") · $((SECONDS-t0))s"
+    else det="${cur:-building} · ↓ $(human_size "$total") · $(human_rate "$rate") · $((SECONDS-t0))s"; fi
     ck_set "$idx" doing "$det"
   done
   wait "$pid" || rc=$?
@@ -175,14 +180,14 @@ ck_set 3 done "${WS_PLUGINS:-none}"
 # 5. base image (toolchain — built once, then reused)
 ck_set 4 doing
 if dock image inspect workstation-base >/dev/null 2>&1; then ck_set 4 done "present (no re-download)"
-else build_phase 4 -f "$REPO_DIR/Dockerfile.base" -t workstation-base "$REPO_DIR" || { echo "⚠ base build failed — see above."; exit 1; }
+else build_phase 4 180 -f "$REPO_DIR/Dockerfile.base" -t workstation-base "$REPO_DIR" || { echo "⚠ base build failed — see above."; exit 1; }
      ck_set 4 done "built"; fi
 
 # 6. workstation image (config + plugins, on top of the base)
 ck_set 5 doing
 prev_plugins="$(cat "$WS_DIR/.plugins" 2>/dev/null || true)"
 if ! dock image inspect workstation >/dev/null 2>&1 || [ "$WS_PLUGINS" != "$prev_plugins" ]; then
-  build_phase 5 --build-arg "WS_LANG=$WS_LANG" --build-arg "WS_PLUGINS=$WS_PLUGINS" -t workstation "$REPO_DIR" || { echo "⚠ image build failed — see above."; exit 1; }
+  build_phase 5 0 --build-arg "WS_LANG=$WS_LANG" --build-arg "WS_PLUGINS=$WS_PLUGINS" -t workstation "$REPO_DIR" || { echo "⚠ image build failed — see above."; exit 1; }
   printf '%s' "$WS_PLUGINS" > "$WS_DIR/.plugins"; ck_set 5 done "built"
 else ck_set 5 done "up to date"; fi
 if dock run --rm workstation test -f /home/dev/.claude/.audio-needed >/dev/null 2>&1; then : > "$WS_DIR/.audio"; else rm -f "$WS_DIR/.audio"; fi
