@@ -144,8 +144,8 @@ task auth                                     # (re)login to Claude, stored in <
    credentials mounted read-only, memory/cpu limits, `--rm` (disposable). The conversation history
    is persisted on the host under the clone's `.git/claude-projects` (out of the worktree, removed
    with the clone). Optional knobs: `WORKSTATION_CLAUDE_*` set launch flags (`--permission-mode` /
-   `--model` / `--effort`); `WORKSTATION_DNS` overrides the container resolver; the tab is titled
-   `<repo> - <topic>` and Claude runs with `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` so it keeps that.
+   `--model` / `--effort`); `WORKSTATION_DNS` overrides the container resolver. The terminal tab
+   title is left to Claude (it reflects the conversation context).
 7. **On exit** — container destroyed; clone kept on host. Delete it only when `git status` is
    clean **and** nothing is unpushed (`git log @{u}..` empty).
 8. **`task resume`** — lists existing clones in a **checkbox menu** (arrow keys, Space/Enter toggle,

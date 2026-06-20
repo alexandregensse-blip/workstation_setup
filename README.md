@@ -74,8 +74,6 @@ task help                        # full help (also shown for: task with no args)
 
 Clones on the host (under `running/`), branches `task/<slug>`, then runs Claude in a **disposable
 container** (Serena connected, auth mounted). On exit: container destroyed, clone kept on the host.
-Each task's terminal tab is titled **`<repo> - <topic>`** (the container runs Claude with
-`CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` so it keeps that name) — handy to tell resumed tabs apart.
 
 **Session persistence & resume** — each task keeps its Claude conversation history on the host inside
 the clone's own `.git/claude-projects` (out of the worktree, never committed, removed with the clone).

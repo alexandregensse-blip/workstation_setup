@@ -189,17 +189,6 @@ _task_run(){
   [ -d "$dir" ] || { echo "task: no clone at $dir"; return 1; }
   local ws_dir dock; ws_dir="$(_task_wsdir)"; dock="$(_task_dock)"
 
-  # name the terminal tab "<repo> - <topic>" (topic = dir name minus the timestamp prefix). The tricky
-  # part: VTE-based terminals (Ptyxis/GNOME) set the title to the *running command* — so they'd stamp
-  # the long 'docker run …' line over any title we set here. We therefore emit the OSC title from
-  # INSIDE the container (after docker has launched → it wins), passing it via WORKSTATION_TAB_TITLE,
-  # and run Claude with CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 so it doesn't overwrite it either.
-  local _tb _repo _topic _title
-  _tb="$(basename "$dir")"; _repo="$(basename "$(dirname "$dir")")"; _topic="${_tb#*_}"
-  [ "$_topic" = "$_tb" ] && _topic=""                      # name was just a timestamp → no topic
-  _title="$_repo${_topic:+ - $_topic}"
-  [ -n "${TMUX:-}" ] && { tmux set-window-option automatic-rename off 2>/dev/null; tmux rename-window "$_title" 2>/dev/null; } || true
-
   local gh_token; gh_token="$(gh auth token 2>/dev/null || true)"
   [ -z "$gh_token" ] && { echo "task: not logged into GitHub — run 'gh auth login' first."; return 1; }
 
@@ -242,9 +231,6 @@ _task_run(){
     jq ".projects[\"/work\"] += {hasTrustDialogAccepted:true, hasCompletedProjectOnboarding:true}" "$cfg" > /tmp/c2 2>/dev/null && mv /tmp/c2 "$cfg"
     # resume the previous conversation when asked (task resume/open) AND a persisted history exists for /work
     [ "${WS_RESUME:-0}" = 1 ] && compgen -G "$HOME/.claude/projects/*/*.jsonl" >/dev/null 2>&1 && set -- --continue "$@"
-    # set the tab title from HERE (after docker launched) so the host terminal cannot stamp the long
-    # docker command over it; CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 then keeps Claude from changing it.
-    [ -n "${WORKSTATION_TAB_TITLE:-}" ] && printf "\033]0;%s\a" "$WORKSTATION_TAB_TITLE"
     exec claude "$@"' _ "${cflags[@]}")
 
   # git identity for in-container commits (attribution only — no secret), from host git
@@ -278,8 +264,6 @@ _task_run(){
     --name "task-$slug" \
     -v "$dir:/work" -w /work \
     -e GH_TOKEN="$gh_token" \
-    -e CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 \
-    -e WORKSTATION_TAB_TITLE="$_title" \
     "${claude_auth[@]}" \
     "${cfg_mounts[@]}" \
     "${gitenv[@]}" \
