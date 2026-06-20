@@ -39,11 +39,16 @@ log(){  printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
 dock(){ if docker info >/dev/null 2>&1; then docker "$@"; else sudo docker "$@"; fi; }
 [ -d "$WS_DIR/.git" ] || { echo "update: no workstation clone at $WS_DIR (pass --dir)"; exit 1; }
 
-log "pull latest workstation ($WS_DIR)"
+# Pull quietly — git's enumerate/unpack/diffstat noise isn't useful here; we summarize instead.
 before="$(git -C "$WS_DIR" rev-parse HEAD 2>/dev/null || echo '')"
-git -C "$WS_DIR" pull --ff-only
+if ! git -C "$WS_DIR" pull --ff-only --quiet >/dev/null 2>&1; then
+  echo "update: 'git pull' failed — likely local edits in $WS_DIR."
+  echo "  inspect:  git -C \"$WS_DIR\" status      discard local edits:  git -C \"$WS_DIR\" checkout -- ."
+  exit 1
+fi
 after="$(git -C "$WS_DIR" rev-parse HEAD 2>/dev/null || echo '')"
 changed="$(git -C "$WS_DIR" diff --name-only "$before" "$after" 2>/dev/null || true)"
+[ "$before" = "$after" ] && echo "Already at the latest version." || echo "Pulled  ${before:0:7} → ${after:0:7}"
 
 # Decide what to rebuild from what the pull actually changed (so we don't build for nothing).
 needs_base=0; needs_thin=0; task_changed=0
@@ -65,27 +70,19 @@ lang=""; dock image inspect workstation >/dev/null 2>&1 && \
 plugins="$(cat "$WS_DIR/.plugins" 2>/dev/null || true)"
 
 if [ "$needs_base" = 0 ] && [ "$needs_thin" = 0 ]; then
-  log "image — already up to date (nothing relevant changed; build skipped)"
+  [ "$before" != "$after" ] && echo "No image rebuild needed."
 else
   if [ "$needs_base" = 1 ]; then
-    if [ "$FRESH" = 1 ]; then
-      log "rebuild base — FRESH (--pull --no-cache → latest Claude/Serena/rtk)"
-      dock build --pull --no-cache -f "$WS_DIR/Dockerfile.base" -t workstation-base "$WS_DIR"
-    else
-      log "rebuild base 'workstation-base' (changed; cached layers reused where possible)"
-      dock build -f "$WS_DIR/Dockerfile.base" -t workstation-base "$WS_DIR"
-    fi
+    [ "$FRESH" = 1 ] && echo "Rebuilding base image — FRESH, latest Claude/Serena/rtk (a few minutes)…" \
+                     || echo "Rebuilding base image (a few minutes)…"
+    if [ "$FRESH" = 1 ]; then dock build --pull --no-cache -f "$WS_DIR/Dockerfile.base" -t workstation-base "$WS_DIR"
+    else                      dock build -f "$WS_DIR/Dockerfile.base" -t workstation-base "$WS_DIR"; fi
   fi
-  log "rebuild 'workstation' (config + plugins, on top of the base)"
+  echo "Rebuilding workstation image (config + plugins)…"
   dock build --build-arg "WS_LANG=$lang" --build-arg "WS_PLUGINS=$plugins" -t workstation "$WS_DIR"
   if dock run --rm workstation test -f /home/dev/.claude/.audio-needed >/dev/null 2>&1; then : > "$WS_DIR/.audio"; else rm -f "$WS_DIR/.audio"; fi
 fi
 
-log "done"
-echo "✓ Updated."
+echo "✓ Up to date."
 # 'task' is sourced from the clone; a child script can't reload it into your current shell.
-if [ "$task_changed" = 1 ]; then
-  echo "  'task' changed — load it into THIS shell:  source ~/.bashrc   (or open a new terminal)"
-else
-  echo "  If you want the latest 'task' in this shell:  source ~/.bashrc   (or open a new terminal)"
-fi
+[ "$task_changed" = 1 ] && echo "  'task' changed — reload it:  source ~/.bashrc   (or open a new terminal)"

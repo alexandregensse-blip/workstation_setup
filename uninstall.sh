@@ -97,6 +97,15 @@ if [ -f "$WS_DIR/.docker-group-added" ] && getent group docker | grep -qw "$(id 
   else echo "  kept"; note_kept "docker-group membership"; fi
 fi
 
+# 4b. docker IPv6 daemon.json — only if WE created it (marker), and only the file we wrote
+if [ -f "$WS_DIR/.docker-ipv6" ] && [ -f /etc/docker/daemon.json ]; then
+  log "docker IPv6 config (/etc/docker/daemon.json)"
+  if confirm "Remove /etc/docker/daemon.json that we created for IPv6? (restarts docker)"; then
+    sudo rm -f /etc/docker/daemon.json && { sudo systemctl restart docker 2>/dev/null || true; }
+    echo "  removed (docker restarted)"; note_removed "docker IPv6 daemon.json"
+  else echo "  kept"; note_kept "docker IPv6 daemon.json"; fi
+fi
+
 # 5. the running task clones — scan git first; warn only about REAL unpushed/uncommitted work
 if [ -d "$WS_RUNNING" ] && [ -n "$(ls -A "$WS_RUNNING" 2>/dev/null)" ]; then
   log "task clones ($WS_RUNNING)"

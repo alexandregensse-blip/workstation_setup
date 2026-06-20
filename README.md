@@ -39,6 +39,7 @@ curl -fsSL .../install.sh | bash -s -- --home ~/dev --yes
 | `--lang`  / `WORKSTATION_LANG`  | Claude UI language (baked in the image) | unset (Claude default) |
 | `--import-prefs` / `--no-import-prefs` | import this machine's Claude prefs (statusline/lang/theme) | ask if a local Claude is found |
 | `--plug-ins` / `WORKSTATION_PLUGINS` | opt-in plugins, comma-separated keys (see `plugins/available`) | prompt per known plugin |
+| `--no-ipv6` / `WORKSTATION_IPV6=0` | don't enable Docker IPv6 (NAT66) for task containers (see [Networking](#networking-ipv6)) | enable if the host has routable IPv6 |
 | `--yes` / `-y` | non-interactive (skip the prompt) | — |
 
 ## Dependencies
@@ -48,6 +49,11 @@ curl -fsSL .../install.sh | bash -s -- --home ~/dev --yes
 **Installed on the host** by `install.sh` — only what's missing, and **only these three** (recorded
 so `uninstall.sh` can offer to remove exactly them): `docker.io`, `git`, `gh`. The host gets nothing
 else: no Claude/Serena/rtk/uv, no `~/.claude`.
+
+The one other host change is conditional: on a **dual-stack** machine, install enables **Docker
+IPv6** by *creating* `/etc/docker/daemon.json` (only if absent — it never edits an existing one) and
+restarting docker. It's **recorded** so `uninstall.sh` reverts it, and you can skip it with
+`--no-ipv6`. See [Networking](#networking-ipv6).
 
 **Inside the Docker image** (Wolfi / `apk`): `bash`, `curl`, `git`, `ripgrep`, `python3`, `gh`, `jq`,
 `shadow`, `ca-certificates`, plus `uv`, Claude Code, **Serena**, **rtk** — and the baked config
@@ -59,7 +65,7 @@ else: no Claude/Serena/rtk/uv, no `~/.claude`.
 task <repo> [topic]              # start: repo fuzzy-matched to your gh repos; topic → timestamp if omitted
 task --here <repo> [topic]       # base = current directory
 task --at /path <repo> [topic]   # base = given path
-task resume                      # reopen existing task clones — pick some (fzf if installed, else numbers), each in a new tab
+task resume                      # reopen task clones (pick some; fzf or numbers), each in a new tab, CONTINUING its Claude session
 task cleanup [-y]                # delete clones that are clean AND fully pushed (asks; -y skips the prompt)
 task settings                    # show your install choices; edit the Claude launch defaults
 task auth                        # (re)login to Claude (stored in .workstation/.claude)
@@ -68,6 +74,13 @@ task help                        # full help (also shown for: task with no args)
 
 Clones on the host (under `running/`), branches `task/<slug>`, then runs Claude in a **disposable
 container** (Serena connected, auth mounted). On exit: container destroyed, clone kept on the host.
+Each task's terminal tab is titled **`<repo> - <topic>`** so resumed tabs are easy to tell apart.
+
+**Session persistence & resume** — each task keeps its Claude conversation history on the host inside
+the clone's own `.git/claude-projects` (out of the worktree, never committed, removed with the clone).
+So `task resume` (and `task open`) relaunch the disposable container and **continue where you left
+off** (`claude --continue`) — handy after a reboot or a `docker restart`. A brand-new `task` starts
+fresh; a clone that has no saved history just opens normally.
 
 **Auto-launch flags** — set these in your shell (or `~/.bashrc`) and every `task` starts that way
 (the container is the sandbox, so `auto`/`bypassPermissions` is reasonable):
@@ -115,6 +128,27 @@ the image is rebuilt when the selection changes.
   host audio socket through (PulseAudio/PipeWire), so the sound plays on your speakers; silent if
   the host has no audio server.
 
+## Networking (IPv6)
+
+Task containers run on Docker's **default bridge**. On a **dual-stack** network (e.g. SFR fibre:
+native IPv6 + DS-Lite IPv4), the **host** transparently falls back to IPv6 when the IPv4 path
+degrades — but default-bridge containers are **IPv4-only**, so they'd get stuck on the bad IPv4 path
+and Claude would drop inside the task (`FailedToOpenSocket` / `ConnectionRefused`) **while your host
+session stays fine**. To give containers the same reach, install **enables Docker IPv6 (NAT66)** when
+it detects routable IPv6 on the host: it **creates** `/etc/docker/daemon.json` with
+
+```json
+{ "ipv6": true, "fixed-cidr-v6": "fd00:dead:beef::/64", "ip6tables": true }
+```
+
+restarts docker, and **records it** so `uninstall.sh` can revert (it rolls back automatically if
+docker won't restart). It **won't edit an existing `daemon.json`** — it prints the keys to add
+instead. Skip entirely with `--no-ipv6` (or `WORKSTATION_IPV6=0`); on a host without IPv6 it's
+skipped on its own. Requires a recent Docker (NAT66 / `ip6tables` is stable since Docker 27).
+
+Still-flaky DNS on a given network (e.g. a phone hotspot)? Set `WORKSTATION_DNS="1.1.1.1 8.8.8.8"`
+and `task` passes those resolvers to the container.
+
 ## Image
 
 Base: **Chainguard Wolfi** (`cgr.dev/chainguard/wolfi-base`) — a minimal, **glibc** "undistro"
@@ -146,7 +180,7 @@ shell if it changed — running the script is a child process, so it can't do th
 
 Removes, **one confirmation at a time**: the `task` block in `.bashrc`, the Docker image, the apt
 packages it installed (`docker`/`git`/`gh` — only those, read from a manifest), your docker-group
-membership (only if it added you), your **task clones** under `running` (it **git-scans them first**
-and tells you which still have unpushed/uncommitted work), and the `.workstation` dir (clone +
-Claude credentials). Ends with a recap of what was removed vs kept; `~/.claude` and your gh login
+membership (only if it added you), the Docker IPv6 `daemon.json` (only if install created it; restarts
+docker), your **task clones** under `running` (it **git-scans them first** and tells you which still
+have unpushed/uncommitted work), and the `.workstation` dir (clone + Claude credentials). Ends with a recap of what was removed vs kept; `~/.claude` and your gh login
 are never touched. `--yes` for non-interactive.

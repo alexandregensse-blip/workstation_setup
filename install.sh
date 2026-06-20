@@ -21,6 +21,7 @@
 #   --lang  <code>  (WORKSTATION_LANG)   Claude UI language (image)     [default: unset / Claude default]
 #   --import-prefs | --no-import-prefs   import this machine's Claude prefs (statusline/lang/theme)  [default: ask]
 #   --plug-ins <list> (WORKSTATION_PLUGINS) opt-in plugins, comma-separated keys (see plugins/available)  [default: prompt]
+#   --no-ipv6 | --ipv6 (WORKSTATION_IPV6) enable Docker IPv6 (NAT66) for task containers  [default: auto — on if the host has routable IPv6]
 #   --yes | -y                           non-interactive (skip prompts)
 
 # This must be EXECUTED (curl … | bash), not sourced: it uses `set -e`/`exit`, which would turn on
@@ -39,6 +40,7 @@ WS_DIR="${WORKSTATION_DIR:-}"
 WS_LANG="${WORKSTATION_LANG:-}"
 IMPORT_PREFS="${WORKSTATION_IMPORT_PREFS:-}"   # ""=ask, 1=yes, 0=no
 WS_PLUGINS="${WORKSTATION_PLUGINS:-}"          # space/comma-separated plugin keys ("" = prompt)
+WS_IPV6="${WORKSTATION_IPV6:-}"                # ""=auto (enable if host has routable IPv6), 1=force, 0=never
 ASSUME_YES=0
 WS_URL="https://github.com/alexandregensse-blip/workstation_setup"
 
@@ -51,8 +53,10 @@ while [ $# -gt 0 ]; do
     --import-prefs)    IMPORT_PREFS=1; shift ;;
     --no-import-prefs) IMPORT_PREFS=0; shift ;;
     --plug-ins) WS_PLUGINS="${2:?--plug-ins requires a comma-separated list}"; shift 2 ;;
+    --no-ipv6) WS_IPV6=0; shift ;;
+    --ipv6)    WS_IPV6=1; shift ;;
     -y|--yes) ASSUME_YES=1; shift ;;
-    *) echo "unknown flag: $1  (use --home/--running/--dir/--lang/--import-prefs/--no-import-prefs/--plug-ins/--yes)"; exit 1 ;;
+    *) echo "unknown flag: $1  (use --home/--running/--dir/--lang/--import-prefs/--no-import-prefs/--plug-ins/--no-ipv6/--yes)"; exit 1 ;;
   esac
 done
 
@@ -156,6 +160,34 @@ log "docker group"
 group_added=0
 if getent group docker | grep -qw "$(id -un)"; then echo "  already a member ✓"
 else sudo usermod -aG docker "$USER"; : > "$WS_DIR/.docker-group-added"; group_added=1; echo "  added (re-login to drop the sudo prompt) ✓"; fi
+
+# Docker IPv6 (NAT66) so task containers match the HOST's dual-stack reach. On networks like SFR
+# fibre (native IPv6 + DS-Lite IPv4), the host silently falls back to IPv6 when the IPv4 path
+# degrades, but default-bridge containers are IPv4-ONLY → Claude drops inside tasks
+# (FailedToOpenSocket/ConnectionRefused) while the host stays fine. Auto-enabled when the host has
+# routable IPv6; opt out with --no-ipv6. We only CREATE /etc/docker/daemon.json (never edit an
+# existing one), record it for uninstall, and roll back if docker won't come back up.
+log "docker IPv6 (task containers dual-stack)"
+if [ "$WS_IPV6" = 0 ]; then
+  echo "  skipped (--no-ipv6)"
+elif [ -z "$WS_IPV6" ] && ! ip -6 route get 2606:4700:4700::1111 >/dev/null 2>&1; then
+  echo "  host has no routable IPv6 — skipped (default bridge stays IPv4; force with --ipv6)"
+elif [ -f /etc/docker/daemon.json ] && grep -Eq '"ipv6"[[:space:]]*:[[:space:]]*true' /etc/docker/daemon.json; then
+  echo "  already enabled in /etc/docker/daemon.json ✓"
+elif [ -f /etc/docker/daemon.json ]; then
+  echo "  /etc/docker/daemon.json exists — not auto-editing it. To enable IPv6, add to it:"
+  echo '    "ipv6": true, "fixed-cidr-v6": "fd00:dead:beef::/64", "ip6tables": true   then: sudo systemctl restart docker'
+else
+  printf '{\n  "ipv6": true,\n  "fixed-cidr-v6": "fd00:dead:beef::/64",\n  "ip6tables": true\n}\n' | sudo tee /etc/docker/daemon.json >/dev/null
+  : > "$WS_DIR/.docker-ipv6"   # marker: WE created daemon.json → uninstall can remove it
+  sudo systemctl restart docker 2>/dev/null || true
+  if timeout 40 bash -c 'until sudo docker info >/dev/null 2>&1; do sleep 1; done' 2>/dev/null; then
+    echo "  enabled ✓ — task containers now get IPv6 (NAT66), matching the host"
+  else
+    sudo rm -f /etc/docker/daemon.json; rm -f "$WS_DIR/.docker-ipv6"; sudo systemctl restart docker 2>/dev/null || true
+    echo "  ⚠ docker didn't restart cleanly with IPv6 — rolled back, continuing without it"
+  fi
+fi
 
 # ===== ALL THE QUESTIONS, up front =====
 log "setup — a few questions, then it builds on its own"

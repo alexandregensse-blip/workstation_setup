@@ -140,6 +140,15 @@ _task_run(){
   [ -d "$dir" ] || { echo "task: no clone at $dir"; return 1; }
   local ws_dir dock; ws_dir="$(_task_wsdir)"; dock="$(_task_dock)"
 
+  # name the terminal tab/window after the task: "<repo> - <topic>" (topic = dir name minus the
+  # timestamp prefix). Works for a fresh 'task' (current tab) and for 'task resume' (each new tab).
+  local _tb _repo _topic _title
+  _tb="$(basename "$dir")"; _repo="$(basename "$(dirname "$dir")")"; _topic="${_tb#*_}"
+  [ "$_topic" = "$_tb" ] && _topic=""                      # name was just a timestamp → no topic
+  _title="$_repo${_topic:+ - $_topic}"
+  printf '\033]0;%s\a' "$_title"                            # OSC 0 — honored by most terminals
+  [ -n "${TMUX:-}" ] && { tmux set-window-option automatic-rename off 2>/dev/null; tmux rename-window "$_title" 2>/dev/null; } || true
+
   local gh_token; gh_token="$(gh auth token 2>/dev/null || true)"
   [ -z "$gh_token" ] && { echo "task: not logged into GitHub — run 'gh auth login' first."; return 1; }
 
