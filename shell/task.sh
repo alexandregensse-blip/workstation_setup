@@ -147,6 +147,38 @@ _task_menu(){
   [ "${#_TASK_PICKED[@]}" -gt 0 ] || return 1
 }
 
+# Interactive SINGLE-select arrow menu. Args: <title> <item>...  ↑/↓ or j/k move, Enter picks the
+# highlighted row, q/Esc cancels. Sets _TASK_SEL (item) and _TASK_SEL_IDX (0-based). Returns 1 on
+# cancel, 2 if there's no usable TTY. Drawn on /dev/tty, redrawn in place.
+_task_select(){
+  _TASK_SEL=""; _TASK_SEL_IDX=-1
+  { true >/dev/tty; } 2>/dev/null || return 2
+  local title="$1"; shift
+  local -a items=("$@"); local n=${#items[@]}; [ "$n" -gt 0 ] || return 1
+  local cur=0 drawn=0 key rest j
+  printf '\n  \033[1m%s\033[0m\n  \033[2m↑/↓ move · Enter select · q/Esc cancel\033[0m\n' "$title" > /dev/tty
+  printf '\033[?25l' > /dev/tty                                    # hide cursor
+  while :; do
+    [ "$drawn" -gt 0 ] && printf '\033[%dA' "$drawn" > /dev/tty
+    for ((j=0; j<n; j++)); do
+      if [ "$j" = "$cur" ]; then printf '\033[K\033[7m ▸ %s \033[0m\n' "${items[j]}" > /dev/tty
+      else                       printf '\033[K   %s\n'                 "${items[j]}" > /dev/tty; fi
+    done
+    drawn=$n
+    IFS= read -rsn1 key < /dev/tty || break
+    case "$key" in
+      $'\033') read -rsn2 -t 0.1 rest < /dev/tty || rest=""
+        case "$rest" in '[A'|'OA') cur=$(((cur-1+n)%n)) ;; '[B'|'OB') cur=$(((cur+1)%n)) ;;
+          *) printf '\033[?25h\n' > /dev/tty; return 1 ;; esac ;;
+      k|K) cur=$(((cur-1+n)%n)) ;;
+      j|J) cur=$(((cur+1)%n)) ;;
+      q|Q) printf '\033[?25h\n' > /dev/tty; return 1 ;;
+      ''|$'\n'|$'\r') printf '\033[?25h\n' > /dev/tty; _TASK_SEL="${items[cur]}"; _TASK_SEL_IDX=$cur; return 0 ;;
+    esac
+  done
+  printf '\033[?25h\n' > /dev/tty; return 1
+}
+
 # resume: choose existing clones and reopen each in its own tab.
 _task_resume(){
   local b; b="$(_task_base)"
@@ -223,42 +255,61 @@ _task_setting_show(){ local v; v="$(_task_cfg "$1")"
   if [ -n "$v" ]; then printf '%s' "$v"; else case "$1" in
     memory) printf 'repo (default)' ;; notify) printf 'off' ;; *) printf '—' ;; esac; fi; }
 
-# settings: a MENU — pick a feature to change (no need to step through all of them), with validation
-# (invalid values are rejected, not silently accepted). Stored in <ws>/.config (no host env).
+# Pickable value choices for a setting, one per line as "<stored-value>|<label>" (empty value =
+# clear/default). Returns 1 for free-form settings (lang/model/dns), which are typed instead.
+_task_setting_choices(){ case "$1" in
+  notify)        printf '%s\n' 'terminal_bell|terminal_bell — bell + flash when Claude is done / needs you' '|off — no notification' ;;
+  memory)        printf '%s\n' 'repo|repo — per-repo memory (default)' 'global|global — shared across all repos' 'off|off — ephemeral, per task' ;;
+  statusline)    printf '%s\n' '|default — keep the status line' 'off|off — hide it' ;;
+  theme)         printf '%s\n' 'dark|dark' 'light|light' 'dark-daltonized|dark-daltonized' 'light-daltonized|light-daltonized' '|— unset (default)' ;;
+  claude_mode)   printf '%s\n' 'auto|auto' 'acceptEdits|acceptEdits' 'bypassPermissions|bypassPermissions' 'default|default' '|— unset' ;;
+  claude_effort) printf '%s\n' 'low|low' 'medium|medium' 'high|high' 'xhigh|xhigh' 'max|max' '|— unset' ;;
+  *) return 1 ;;
+esac; }
+
+# Edit ONE setting: a value picker (arrow keys) for settings with a known set — so you can't even
+# enter an invalid value — or a validated typed prompt for free-form ones (lang/model/dns).
+_task_setting_edit(){
+  local k="$1" choices; choices="$(_task_setting_choices "$k")"
+  if [ -n "$choices" ]; then
+    local -a labels=() vals=(); local val lab
+    while IFS='|' read -r val lab; do vals+=("$val"); labels+=("$lab"); done <<< "$choices"
+    _task_select "Set '$k'" "${labels[@]}" || return 0          # cancelled → leave unchanged
+    _task_cfg_set "$k" "${vals[$_TASK_SEL_IDX]}"
+    [ -n "${vals[$_TASK_SEL_IDX]}" ] && echo "  ✓ $k = ${vals[$_TASK_SEL_IDX]}" || echo "  ✓ $k cleared (default)"
+    return 0
+  fi
+  # free-form: typed value with validation (Enter=keep · "-"=clear)
+  local cur ans
+  while :; do
+    cur="$(_task_cfg "$k")"
+    printf '\n  %s — %s\n  [now: %s · Enter=keep · "-"=clear] > ' "$k" "$(_task_setting_hint "$k")" "${cur:-none}" > /dev/tty
+    read -r ans < /dev/tty || return 0
+    case "$ans" in
+      '') return 0 ;;
+      '-') _task_cfg_set "$k" ""; echo "  ✓ $k cleared" > /dev/tty; return 0 ;;
+      *) if _task_setting_validate "$k" "$ans"; then _task_cfg_set "$k" "$ans"; echo "  ✓ $k = $ans" > /dev/tty; return 0
+         else echo "  ✗ $_TASK_SETTING_ERR" > /dev/tty; fi ;;
+    esac
+  done
+}
+
+# settings: an interactive MENU (arrow keys) — highlight a feature, Enter to change it (value picker
+# for known sets, validated typing otherwise), "Done" to finish. Stored in <ws>/.config (no host env).
 _task_settings(){
-  local cf; cf="$(_task_cfg_file)"
+  local cf k; cf="$(_task_cfg_file)"
   local -a keys; mapfile -t keys < <(_task_setting_keys)
   if ! { true >/dev/tty; } 2>/dev/null; then          # non-interactive: just print the values
     echo "Workstation features (config: $cf):"
-    local k; for k in "${keys[@]}"; do printf '  %-13s %s\n' "$k" "$(_task_setting_show "$k")"; done
+    for k in "${keys[@]}"; do printf '  %-13s %s\n' "$k" "$(_task_setting_show "$k")"; done
     return 0
   fi
   while :; do
-    echo
-    echo "Workstation features  (saved to $cf · applied to the next task):"
-    local i=1 k
-    for k in "${keys[@]}"; do printf '  %2d) %-13s %s\n' "$i" "$k" "$(_task_setting_show "$k")"; i=$((i+1)); done
-    printf '  Edit which? [number or name · q to finish]: '
-    local pick; read -r pick < /dev/tty || break
-    case "$pick" in
-      ''|q|Q|quit|done) break ;;
-      *[!0-9]*) k="$pick" ;;                          # a name
-      *) k="${keys[$((pick-1))]:-}" ;;               # a number
-    esac
-    _task_setting_keys | grep -qxF "${k:-}" || { echo "  ? no such setting: '$pick'"; continue; }
-    # edit loop for this key, with validation
-    local cur ans
-    while :; do
-      cur="$(_task_cfg "$k")"
-      printf '  %s\n    %s\n    [now: %s · Enter=keep · "-"=clear] > ' "$k" "$(_task_setting_hint "$k")" "${cur:-none}"
-      read -r ans < /dev/tty || break
-      case "$ans" in
-        '') break ;;
-        '-') _task_cfg_set "$k" ""; echo "  ✓ $k cleared"; break ;;
-        *) if _task_setting_validate "$k" "$ans"; then _task_cfg_set "$k" "$ans"; echo "  ✓ $k = $ans"; break
-           else echo "  ✗ $_TASK_SETTING_ERR"; fi ;;
-      esac
-    done
+    local -a rows=(); for k in "${keys[@]}"; do rows+=("$(printf '%-13s %s' "$k" "$(_task_setting_show "$k")")"); done
+    rows+=("✔ Done")
+    _task_select "Workstation features — pick one to change" "${rows[@]}" || break
+    [ "$_TASK_SEL_IDX" -ge "${#keys[@]}" ] && break                # 'Done'
+    _task_setting_edit "${keys[$_TASK_SEL_IDX]}"
   done
   echo "✓ Saved to $cf — applies to the next task (no host environment touched)."
 }
