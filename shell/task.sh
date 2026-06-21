@@ -191,8 +191,9 @@ _task_settings(){
   echo "  config file:               $cf"
   echo "  Features (apply to the next task):"
   local k v
-  for k in notify lang theme statusline dns claude_mode claude_model claude_effort; do
-    v="$(_task_cfg "$k")"; printf '    %-13s %s\n' "$k" "${v:-—}"
+  for k in memory notify lang theme statusline dns claude_mode claude_model claude_effort; do
+    v="$(_task_cfg "$k")"; [ "$k" = memory ] && [ -z "$v" ] && v="repo (default)"
+    printf '    %-13s %s\n' "$k" "${v:-—}"
   done
   echo "  (paths/prefs are set by re-running install; these features need no rebuild.)"
   [ -r /dev/tty ] || return 0
@@ -201,6 +202,7 @@ _task_settings(){
   echo "(Enter = keep current · \"-\" = clear · or type a new value)"
   local spec key prompt cur ans
   for spec in \
+    'memory|auto-memory persistence: repo (per-repo, default) / global (all repos) / off (per task)' \
     'notify|notifications: terminal_bell (bell+flash when Claude is done / needs you), empty = off' \
     'lang|Claude UI language code, e.g. fr / en (empty = Claude default)' \
     'theme|theme: dark / light / … (empty = default)' \
@@ -306,6 +308,19 @@ _task_run(){
   [ -n "$_lang" ]   && _feat="$_feat\"language\":\"$_lang\","
   [ -n "$_theme" ]  && _feat="$_feat\"theme\":\"$_theme\","
   [ "$_sl" = off ]  && _feat="$_feat\"statusLine\":null,"
+  # Persist Claude's auto-memory ACROSS future tasks (it's per-repo by design, but each task is a
+  # fresh /work, so by default it'd be lost). 'memory': repo (default — shared by all tasks on this
+  # repo), global (shared across all repos), off (ephemeral per task). We point Claude's
+  # autoMemoryDirectory at a mounted host dir under <ws>/.memory (self-contained, no host pollution).
+  local -a memmount=()
+  local _mem _repo _memdir; _mem="$(_task_cfg memory)"; [ -z "$_mem" ] && _mem=repo
+  if [ "$_mem" != off ]; then
+    _repo="$(basename "$(dirname "$dir")")"
+    [ "$_mem" = global ] && _memdir="$ws_dir/.memory/_global" || _memdir="$ws_dir/.memory/$_repo"
+    mkdir -p "$_memdir"
+    memmount=(-v "$_memdir:/memory")
+    _feat="$_feat\"autoMemoryDirectory\":\"/memory\","
+  fi
   [ -n "$_feat" ] && cflags+=(--settings "{${_feat%,}}")
 
   # Conversation history persists per-clone on the HOST (survives the disposable --rm container; resume
@@ -387,6 +402,7 @@ _task_run(){
     "${gitenv[@]}" \
     "${dns[@]}" \
     "${session[@]}" \
+    "${memmount[@]}" \
     "${resume_env[@]}" \
     --memory=4g --cpus=2 \
     workstation "${claude_cmd[@]}"

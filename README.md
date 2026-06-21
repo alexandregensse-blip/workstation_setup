@@ -81,6 +81,10 @@ So `task resume` (and `task open`) relaunch the disposable container and **conti
 off** (`claude --continue`) — handy after a reboot or a `docker restart`. A brand-new `task` starts
 fresh; a clone that has no saved history just opens normally.
 
+Distinct from history, **Claude's auto-memory persists across *different* tasks**: history is
+per-clone (for resume), but memory is per-repo — see the `memory` feature below. So what Claude
+learns about a repo in one task is available in the next, while each task keeps its own transcript.
+
 **MCP artifacts stay out of `git status`** — tools like Serena write a `.serena/` dir (cache,
 memories, project config) into the repo. `task` adds known MCP artifacts to the clone-local
 `.git/info/exclude` (never the repo's committed `.gitignore` — we don't impose our tooling on the
@@ -93,6 +97,7 @@ environment stays clean). They take effect on the next task, no rebuild:
 
 | Feature | Effect |
 |---|---|
+| `memory` | persist Claude's auto-memory across future tasks: `repo` (default — shared by all tasks on this repo), `global` (all repos), `off` (per-task). Stored in `.workstation/.memory/` |
 | `notify` | `terminal_bell` → bell + flash when Claude is done / needs you (native; via `claude --settings`) |
 | `lang` | Claude UI language code (e.g. `fr`) |
 | `theme` | `dark` / `light` / … |

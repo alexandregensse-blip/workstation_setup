@@ -11,6 +11,7 @@
 /.dl-base
 /.dl-image
 /.claude/
+/.memory/
 /gh/
 
 # Safety net: never commit credentials / secrets.

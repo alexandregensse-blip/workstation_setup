@@ -140,7 +140,11 @@ task slots                                    # list credential slots (independe
    with the clone). **Features** from `<ws>/.config` (`task settings`) apply here: `claude_mode`/
    `claude_model`/`claude_effort` → launch flags; `notify`/`lang`/`theme`/`statusline` → merged onto
    the baked settings.json via `claude --settings '{…}'` (so the baked Serena/rtk hooks are kept);
-   `dns` → `--dns`. The terminal tab title is left to Claude (it reflects the conversation context).
+   `dns` → `--dns`. **Auto-memory** persists across *future* tasks (not just this clone): Claude's
+   `autoMemoryDirectory` is pointed (via the same `--settings`) at `/memory`, a mounted host dir under
+   `<ws>/.memory/<repo>` (`memory=repo`, default) or `<ws>/.memory/_global` (`memory=global`), so it
+   survives the disposable container and is shared by every task on the repo; `memory=off` keeps it
+   per-task. History stays per-clone — the two are separate mounts. Tab title is left to Claude.
 7. **On exit** — container destroyed; clone kept on host. Delete it only when `git status` is
    clean **and** nothing is unpushed (`git log @{u}..` empty).
 8. **`task resume`** — lists existing clones in a **checkbox menu** (arrow keys, Space/Enter toggle,
