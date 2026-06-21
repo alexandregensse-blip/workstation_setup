@@ -27,3 +27,12 @@ RUN i=1; until uv tool install -p 3.13 serena-agent; do \
 RUN i=1; until curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh && command -v rtk >/dev/null 2>&1; do \
       [ "$i" -ge 5 ] && { echo "rtk install failed after $i tries"; exit 1; }; \
       echo "  rtk download interrupted — retry $i…"; i=$((i+1)); sleep 5; done
+
+# GNU userland for SCRIPTS. Wolfi falls back to busybox for grep/date/sed/awk/find, whose busybox
+# variants lack GNU features that scripts depend on — e.g. `grep --include`, `date +%s%N` — so
+# non-interactive scripts (gates, cascades) break (an interactive grep→ugrep alias doesn't help them,
+# scripts don't inherit shell functions). Install the real GNU tools (they win on PATH at /usr/bin).
+# Last layer on purpose: rebuilds reuse all the cached toolchain layers above.
+USER root
+RUN apk add --no-cache grep sed gawk coreutils findutils
+USER dev
