@@ -94,9 +94,10 @@ Missing flag values fail fast with a clear message (guarded against `set -u`).
    only if missing, then the thin **`workstation`** (config + hooks, `FROM workstation-base`). Uses
    the `docker`-or-`sudo docker` wrapper (see §8). Optional features are applied at run time, not baked.
 7. **`task` command** — auto-sourced in `~/.bashrc` (once), inside a `# >>> workstation >>>` …
-   `# <<< workstation <<<` marked block that also exports `WORKSTATION_DIR`/`WORKSTATION_RUNNING`
-   (and any `WORKSTATION_CLAUDE_*` launch defaults). The block sources `task` **straight from the
-   clone** (`$WS_DIR/shell/task.sh`).
+   `# <<< workstation <<<` MINIMAL marked block: it exports only `WORKSTATION_DIR`/`WORKSTATION_RUNNING`
+   and sources `task` **straight from the clone** (`$WS_DIR/shell/task.sh`). Feature settings are NOT
+   exported here — install seeds them into `<ws>/.config` (first install only; notifications default
+   ON, plus language/launch defaults), later edited by `task settings`, so the host env stays clean.
 8. **GitHub auth** — `gh auth login --web` only if not already authenticated (skipped with no TTY).
 9. **Claude credentials** — logs in **inside a container** and copies the resulting
    `.credentials.json` to `<workspace>/.workstation/.claude/` (host `~/.claude` stays untouched).
@@ -113,7 +114,7 @@ Missing flag values fail fast with a clear message (guarded against `set -u`).
 task [--here | --at <path>] [repo] [topic]   # start a task (runs in the current tab)
 task resume                                   # reopen clones (checkbox menu), each in a new tab, CONTINUE its Claude session
 task cleanup [-y]                             # delete clones that are clean AND fully pushed
-task settings                                 # show install choices; edit the Claude launch defaults
+task settings                                 # show/edit features (notifications, language, theme, DNS, launch defaults)
 task auth [--slot <name>]                     # (re)login to Claude; --slot = independent login (see §8)
 task slots                                    # list credential slots (independent logins for parallel tasks)
 ```
@@ -136,9 +137,10 @@ task slots                                    # list credential slots (independe
 6. **Run** Claude inside the container: clone mounted at `/work`, `GH_TOKEN` injected, Claude
    credentials mounted read-only, memory/cpu limits, `--rm` (disposable). The conversation history
    is persisted on the host under the clone's `.git/claude-projects` (out of the worktree, removed
-   with the clone). Optional knobs: `WORKSTATION_CLAUDE_*` set launch flags (`--permission-mode` /
-   `--model` / `--effort`); `WORKSTATION_DNS` overrides the container resolver. The terminal tab
-   title is left to Claude (it reflects the conversation context).
+   with the clone). **Features** from `<ws>/.config` (`task settings`) apply here: `claude_mode`/
+   `claude_model`/`claude_effort` → launch flags; `notify`/`lang`/`theme`/`statusline` → merged onto
+   the baked settings.json via `claude --settings '{…}'` (so the baked Serena/rtk hooks are kept);
+   `dns` → `--dns`. The terminal tab title is left to Claude (it reflects the conversation context).
 7. **On exit** — container destroyed; clone kept on host. Delete it only when `git status` is
    clean **and** nothing is unpushed (`git log @{u}..` empty).
 8. **`task resume`** — lists existing clones in a **checkbox menu** (arrow keys, Space/Enter toggle,
@@ -178,7 +180,7 @@ default-bridge containers are **IPv4-only** — so they stall (`FailedToOpenSock
 inside the task) while the host session stays fine. Install therefore enables **Docker IPv6 (NAT66)**
 when it detects routable host IPv6 (§5, step 5): it creates `/etc/docker/daemon.json` with `ipv6` +
 `fixed-cidr-v6` + `ip6tables`, giving containers the same reach. Opt out with `--no-ipv6`. For a
-network with flaky DNS, `WORKSTATION_DNS="1.1.1.1 8.8.8.8"` makes `task` pass those resolvers via
+network with flaky DNS, the `dns` feature (`task settings`) makes `task` pass those resolvers via
 `--dns`. (Requires a recent Docker — NAT66 / `ip6tables` stable since Docker 27.)
 
 ## 8. Auth model

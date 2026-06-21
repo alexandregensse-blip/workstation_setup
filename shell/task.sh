@@ -16,6 +16,23 @@ _task_base(){ printf '%s' "${WORKSTATION_RUNNING:-${WORKSTATION_HOME:-$HOME/dev}
 _task_wsdir(){ printf '%s' "${WORKSTATION_DIR:-${WORKSTATION_HOME:-$HOME/dev}/.workstation}"; }
 _task_dock(){ if docker info >/dev/null 2>&1; then echo docker; else echo "sudo docker"; fi; }
 _task_slots_dir(){ printf '%s' "$(_task_wsdir)/.claude-slots"; }
+_task_cfg_file(){ printf '%s' "$(_task_wsdir)/.config"; }
+
+# Read an optional-feature setting WITHOUT polluting the host environment: the persistent store is a
+# key=value file in <ws>/.config (parsed in pure bash — the host only has docker/git/gh, no jq). An
+# env var WORKSTATION_<KEY> still works as an ad-hoc override but is never written by us.
+#   _task_cfg <key>   e.g. _task_cfg notify / claude_mode / lang / theme / dns / statusline
+_task_cfg(){
+  local key="$1" ev="WORKSTATION_${1^^}"
+  if [ -n "${!ev:-}" ]; then printf '%s' "${!ev}"; return 0; fi
+  sed -n "s/^${key}=//p" "$(_task_cfg_file)" 2>/dev/null | tail -1
+}
+# Write/clear a setting in the config file (clears when value is empty). Creates the file as needed.
+_task_cfg_set(){
+  local key="$1" val="$2" f; f="$(_task_cfg_file)"; mkdir -p "$(dirname "$f")"; touch "$f"
+  sed -i "/^${key}=/d" "$f"
+  [ -n "$val" ] && printf '%s=%s\n' "$key" "$val" >> "$f"
+}
 
 _task_help(){
   cat <<'EOF'
@@ -57,10 +74,12 @@ _task_clones(){ local b; b="$(_task_base)"; [ -d "$b" ] || return 0
 # interactive so 'task' (sourced from ~/.bashrc) is available, then runs <cmd>, then stays open.
 _task_newtab(){
   local cmd="$1" run pre="" v
-  # A new tab is spawned by the terminal/its daemon, NOT as a child of this shell, so vars you
-  # exported only here (e.g. WORKSTATION_CLAUDE_MODE=auto) wouldn't reach it — only ~/.bashrc would.
-  # Re-export the current values AFTER bashrc is sourced so the running shell's settings win.
-  for v in WORKSTATION_DIR WORKSTATION_RUNNING WORKSTATION_CLAUDE_MODE WORKSTATION_CLAUDE_MODEL WORKSTATION_CLAUDE_EFFORT WORKSTATION_DNS; do
+  # Persistent settings live in <ws>/.config, which the new tab reads via WORKSTATION_DIR (set by the
+  # sourced ~/.bashrc) — so features carry over without any host env. But a new tab is spawned by the
+  # terminal/its daemon, NOT a child of this shell, so any ad-hoc env OVERRIDE set only in the current
+  # shell wouldn't reach it; re-export those (if present) AFTER bashrc so the running shell's wins.
+  for v in WORKSTATION_DIR WORKSTATION_RUNNING WORKSTATION_NOTIFY WORKSTATION_LANG WORKSTATION_THEME \
+           WORKSTATION_STATUSLINE WORKSTATION_DNS WORKSTATION_CLAUDE_MODE WORKSTATION_CLAUDE_MODEL WORKSTATION_CLAUDE_EFFORT; do
     [ -n "${!v:-}" ] && pre+="export $v=$(printf %q "${!v}"); "
   done
   run="${pre}${cmd}; exec bash"
@@ -161,31 +180,40 @@ _task_cleanup(){
   echo "cleanup: removed $removed, kept $kept  (clones with uncommitted/unpushed work are always kept)."
 }
 
-# settings: show the choices made at install + edit the Claude launch defaults (in the ~/.bashrc block).
+# settings: show + edit optional features. Stored in <ws>/.config (NOT host env), applied to the next
+# task. Features: notify (terminal bell), lang, theme, dns, and the Claude launch defaults.
 _task_settings(){
-  local ws_dir base; ws_dir="$(_task_wsdir)"; base="$(_task_base)"
+  local ws_dir base cf; ws_dir="$(_task_wsdir)"; base="$(_task_base)"; cf="$(_task_cfg_file)"
   echo "Workstation settings:"
-  echo "  workspace / .workstation (WORKSTATION_DIR):  $ws_dir"
-  echo "  task clones      (WORKSTATION_RUNNING):      $base"
-  echo "  imported host prefs:                         $([ -f "$ws_dir/.claude/settings.json" ] && echo yes || echo no)"
-  echo "  onboarding/account imported:                 $([ -f "$ws_dir/.claude/claude-keys.json" ] && echo yes || echo no)"
-  echo "  Claude launch — mode:   ${WORKSTATION_CLAUDE_MODE:-default}"
-  echo "                  model:  ${WORKSTATION_CLAUDE_MODEL:-default}"
-  echo "                  effort: ${WORKSTATION_CLAUDE_EFFORT:-default}"
-  echo "  (paths are changed by re-running install or 'update'.)"
+  echo "  workspace / .workstation:  $ws_dir"
+  echo "  task clones:               $base"
+  echo "  imported host prefs:       $([ -f "$ws_dir/.claude/statusline.sh" ] && echo 'yes (statusline)' || echo no)"
+  echo "  config file:               $cf"
+  echo "  Features (apply to the next task):"
+  local k v
+  for k in notify lang theme statusline dns claude_mode claude_model claude_effort; do
+    v="$(_task_cfg "$k")"; printf '    %-13s %s\n' "$k" "${v:-—}"
+  done
+  echo "  (paths/prefs are set by re-running install; these features need no rebuild.)"
   [ -r /dev/tty ] || return 0
-  printf '\nEdit the Claude launch defaults now? [y/N]: '; local a; read -r a < /dev/tty || a=n
+  printf '\nEdit features now? [y/N]: '; local a; read -r a < /dev/tty || a=n
   case "$a" in y|Y|yes|YES) ;; *) return 0 ;; esac
-  local mode model effort bashrc="$HOME/.bashrc"
-  printf '  permission mode [auto/acceptEdits/bypassPermissions/default, empty=clear]: '; read -r mode   < /dev/tty
-  printf '  model (alias/id, empty=clear): ';                                            read -r model  < /dev/tty
-  printf '  effort [low/medium/high/xhigh/max, empty=clear]: ';                          read -r effort < /dev/tty
-  grep -q '# >>> workstation >>>' "$bashrc" 2>/dev/null || { echo "task: no workstation block in ~/.bashrc; set the WORKSTATION_CLAUDE_* vars yourself."; return 1; }
-  sed -i '/^export WORKSTATION_CLAUDE_/d' "$bashrc"                       # drop old, then re-insert (after RUNNING)
-  [ -n "$effort" ] && sed -i "/^export WORKSTATION_RUNNING=/a export WORKSTATION_CLAUDE_EFFORT=\"$effort\"" "$bashrc"
-  [ -n "$model" ]  && sed -i "/^export WORKSTATION_RUNNING=/a export WORKSTATION_CLAUDE_MODEL=\"$model\""  "$bashrc"
-  [ -n "$mode" ]   && sed -i "/^export WORKSTATION_RUNNING=/a export WORKSTATION_CLAUDE_MODE=\"$mode\""    "$bashrc"
-  echo "✓ updated. Run 'source ~/.bashrc' (or open a new terminal) to apply."
+  echo "(Enter = keep current · \"-\" = clear · or type a new value)"
+  local spec key prompt cur ans
+  for spec in \
+    'notify|notifications: terminal_bell (bell+flash when Claude is done / needs you), empty = off' \
+    'lang|Claude UI language code, e.g. fr / en (empty = Claude default)' \
+    'theme|theme: dark / light / … (empty = default)' \
+    'statusline|status line: off = disable it (empty = keep the image default / imported one)' \
+    'dns|reliable DNS, space-separated IPs e.g. "1.1.1.1 8.8.8.8" (empty = host resolver)' \
+    'claude_mode|permission mode: auto / acceptEdits / bypassPermissions / default' \
+    'claude_model|model: an alias (opus/sonnet) or a full id' \
+    'claude_effort|effort: low / medium / high / xhigh / max'; do
+    key="${spec%%|*}"; prompt="${spec#*|}"; cur="$(_task_cfg "$key")"
+    printf '  %s\n    [now: %s] > ' "$prompt" "${cur:-none}"; read -r ans < /dev/tty || ans=""
+    case "$ans" in '') ;; '-') _task_cfg_set "$key" "" ;; *) _task_cfg_set "$key" "$ans" ;; esac
+  done
+  echo "✓ Saved to $cf — applies to the next task (no host environment touched)."
 }
 
 # --- Claude credential SLOTS (independent, self-refreshing logins; one per concurrent task) ---
@@ -263,14 +291,22 @@ _task_run(){
 
   _task_ignore_mcp "$dir"   # keep Serena/MCP artifacts out of git status (clone-local exclude)
 
-  # Claude launch flags from env — set these (e.g. in ~/.bashrc) to apply to every task:
-  #   WORKSTATION_CLAUDE_MODE   → --permission-mode (auto | acceptEdits | bypassPermissions | default)
-  #   WORKSTATION_CLAUDE_MODEL  → --model (alias like 'opus'/'sonnet' or a full id)
-  #   WORKSTATION_CLAUDE_EFFORT → --effort (low | medium | high | xhigh | max)
+  # Claude launch flags + optional features, read from the config (env override wins; 'task settings'
+  # edits them). Launch flags: claude_mode → --permission-mode, claude_model → --model, claude_effort
+  # → --effort. Features merged on top of the baked settings.json via `claude --settings <json>`:
+  # notify → preferredNotifChannel (terminal bell on done/needs-you), lang → language, theme → theme.
   local -a cflags=()
-  [ -n "${WORKSTATION_CLAUDE_MODE:-}" ]   && cflags+=(--permission-mode "$WORKSTATION_CLAUDE_MODE")
-  [ -n "${WORKSTATION_CLAUDE_MODEL:-}" ]  && cflags+=(--model "$WORKSTATION_CLAUDE_MODEL")
-  [ -n "${WORKSTATION_CLAUDE_EFFORT:-}" ] && cflags+=(--effort "$WORKSTATION_CLAUDE_EFFORT")
+  local _m _md _ef; _m="$(_task_cfg claude_mode)"; _md="$(_task_cfg claude_model)"; _ef="$(_task_cfg claude_effort)"
+  [ -n "$_m" ]  && cflags+=(--permission-mode "$_m")
+  [ -n "$_md" ] && cflags+=(--model "$_md")
+  [ -n "$_ef" ] && cflags+=(--effort "$_ef")
+  local _notify _lang _theme _sl _feat=""
+  _notify="$(_task_cfg notify)"; _lang="$(_task_cfg lang)"; _theme="$(_task_cfg theme)"; _sl="$(_task_cfg statusline)"
+  [ -n "$_notify" ] && _feat="$_feat\"preferredNotifChannel\":\"$_notify\","
+  [ -n "$_lang" ]   && _feat="$_feat\"language\":\"$_lang\","
+  [ -n "$_theme" ]  && _feat="$_feat\"theme\":\"$_theme\","
+  [ "$_sl" = off ]  && _feat="$_feat\"statusLine\":null,"
+  [ -n "$_feat" ] && cflags+=(--settings "{${_feat%,}}")
 
   # Conversation history persists per-clone on the HOST (survives the disposable --rm container; resume
   # continues it). Inside .git/ so it's out of the worktree and removed with the clone. mkdir first so
@@ -338,9 +374,9 @@ _task_run(){
   [ -n "$gname" ]  && gitenv+=(-e "GIT_AUTHOR_NAME=$gname"   -e "GIT_COMMITTER_NAME=$gname")
   [ -n "$gemail" ] && gitenv+=(-e "GIT_AUTHOR_EMAIL=$gemail" -e "GIT_COMMITTER_EMAIL=$gemail")
 
-  # optional reliable DNS in the container (set WORKSTATION_DNS="1.1.1.1 8.8.8.8" if the network's
-  # own DNS is flaky, e.g. a phone hotspot). Default: inherit the host resolver.
-  local -a dns=() d; for d in ${WORKSTATION_DNS:-}; do dns+=(--dns "$d"); done
+  # optional reliable DNS in the container (config 'dns', e.g. "1.1.1.1 8.8.8.8", if the network's
+  # own DNS is flaky like a phone hotspot). Default: inherit the host resolver.
+  local -a dns=() d; for d in $(_task_cfg dns); do dns+=(--dns "$d"); done
 
   $dock run -it --rm \
     --name "task-$slug" \

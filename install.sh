@@ -221,18 +221,36 @@ elif [ -f "$HOME/.claude/.credentials.json" ]; then
 else NEED_LOGIN=1; CLAUDE_NOTE="will log in after the build"; fi
 echo "  → Claude: $CLAUDE_NOTE"
 
-# Claude launch defaults (written into the ~/.bashrc block so every task starts that way)
-CL_MODE="${WORKSTATION_CLAUDE_MODE:-}"; CL_MODEL="${WORKSTATION_CLAUDE_MODEL:-}"; CL_EFFORT="${WORKSTATION_CLAUDE_EFFORT:-}"
-if [ "$ASSUME_YES" = 0 ] && [ -r /dev/tty ] && [ -z "$CL_MODE$CL_MODEL$CL_EFFORT" ]; then
-  printf '  Set Claude launch defaults for every task (auto mode / model / effort)? [y/N]: '
-  read -r a < /dev/tty || a=n
-  case "$a" in y|Y|yes|YES)
-    printf '    permission mode [auto/acceptEdits/bypassPermissions/default, empty=auto]: '; read -r CL_MODE < /dev/tty; [ -z "$CL_MODE" ] && CL_MODE=auto
-    printf '    model (alias like opus/sonnet, or full id; empty=skip): '; read -r CL_MODEL < /dev/tty
-    printf '    effort [low/medium/high/xhigh/max, empty=skip]: '; read -r CL_EFFORT < /dev/tty ;;
-  esac
+# Optional FEATURES → <ws>/.config (a key=value file, NOT host env vars). Editable later via
+# 'task settings'. First install seeds it; a re-install keeps your existing config untouched.
+CFG_FILE="$WS_DIR/.config"
+if [ ! -f "$CFG_FILE" ]; then
+  CL_MODE="${WORKSTATION_CLAUDE_MODE:-}"; CL_MODEL="${WORKSTATION_CLAUDE_MODEL:-}"; CL_EFFORT="${WORKSTATION_CLAUDE_EFFORT:-}"
+  NOTIFY="${WORKSTATION_NOTIFY:-}"; THEME="${WORKSTATION_THEME:-}"; DNS="${WORKSTATION_DNS:-}"
+  if [ "$ASSUME_YES" = 0 ] && [ -r /dev/tty ]; then
+    if [ -z "$NOTIFY" ]; then
+      printf '  Enable native notifications (terminal bell + flash when Claude is done / needs you)? [Y/n]: '
+      read -r a < /dev/tty || a=y; case "$a" in n|N|no|NO) NOTIFY= ;; *) NOTIFY=terminal_bell ;; esac
+    fi
+    if [ -z "$CL_MODE$CL_MODEL$CL_EFFORT" ]; then
+      printf '  Set Claude launch defaults for every task (mode / model / effort)? [y/N]: '
+      read -r a < /dev/tty || a=n
+      case "$a" in y|Y|yes|YES)
+        printf '    permission mode [auto/acceptEdits/bypassPermissions/default, empty=auto]: '; read -r CL_MODE < /dev/tty; [ -z "$CL_MODE" ] && CL_MODE=auto
+        printf '    model (alias like opus/sonnet, or full id; empty=skip): '; read -r CL_MODEL < /dev/tty
+        printf '    effort [low/medium/high/xhigh/max, empty=skip]: '; read -r CL_EFFORT < /dev/tty ;;
+      esac
+    fi
+  else [ -z "$NOTIFY" ] && NOTIFY=terminal_bell; fi   # default ON, even headless
+  : > "$CFG_FILE"
+  for kv in "notify=$NOTIFY" "lang=$WS_LANG" "theme=$THEME" "dns=$DNS" \
+            "claude_mode=$CL_MODE" "claude_model=$CL_MODEL" "claude_effort=$CL_EFFORT"; do
+    [ -n "${kv#*=}" ] && echo "$kv" >> "$CFG_FILE"
+  done
+  echo "  → features: notify=${NOTIFY:-off} lang=${WS_LANG:-default} mode=${CL_MODE:-default} model=${CL_MODEL:-default} effort=${CL_EFFORT:-default}"
+else
+  echo "  → features: keeping existing $CFG_FILE (edit with 'task settings')"
 fi
-echo "  → launch: mode=${CL_MODE:-default} model=${CL_MODEL:-default} effort=${CL_EFFORT:-default}"
 
 # ===== Execution — runs straight through (live checklist) =====
 printf '\n\033[1;36m== building (no more questions) ==\033[0m\n\n'; ck_render
@@ -274,12 +292,11 @@ else ck_set 2 done "skipped — image defaults"; fi
 # 3. task command (auto-sourced in ~/.bashrc, removable block)
 ck_set 3 doing
 if ! grep -q '# >>> workstation >>>' "$HOME/.bashrc" 2>/dev/null; then
+  # Minimal block — only the install-location pointers + the source line. Feature settings live in
+  # <ws>/.config (edited by 'task settings'), NOT as env exports, so the host environment stays clean.
   { echo '# >>> workstation >>>'
     echo "export WORKSTATION_DIR=\"$WS_DIR\""
     echo "export WORKSTATION_RUNNING=\"$WS_RUNNING\""
-    [ -n "$CL_MODE" ]   && echo "export WORKSTATION_CLAUDE_MODE=\"$CL_MODE\""
-    [ -n "$CL_MODEL" ]  && echo "export WORKSTATION_CLAUDE_MODEL=\"$CL_MODEL\""
-    [ -n "$CL_EFFORT" ] && echo "export WORKSTATION_CLAUDE_EFFORT=\"$CL_EFFORT\""
     echo "source \"$WS_DIR/shell/task.sh\""
     echo '# <<< workstation <<<'; } >> "$HOME/.bashrc"
   ck_set 3 done "added to ~/.bashrc"

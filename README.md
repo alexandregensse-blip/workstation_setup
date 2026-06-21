@@ -66,7 +66,7 @@ task --here <repo> [topic]       # base = current directory
 task --at /path <repo> [topic]   # base = given path
 task resume                      # reopen task clones (pick some in a checkbox menu), each in a new tab, CONTINUING its Claude session
 task cleanup [-y]                # delete clones that are clean AND fully pushed (asks; -y skips the prompt)
-task settings                    # show your install choices; edit the Claude launch defaults
+task settings                    # show/edit features (notifications, language, theme, DNS, launch defaults)
 task auth [--slot <name>]        # (re)login to Claude; --slot makes an independent login (see Auth)
 task slots                       # list credential slots (independent logins for parallel long tasks)
 task help                        # full help (also shown for: task with no args)
@@ -87,14 +87,21 @@ memories, project config) into the repo. `task` adds known MCP artifacts to the 
 project), so they're invisible to git on the host and in the container, and vanish with the clone.
 The list is curated (Serena today); extend `_task_mcp_artifacts` in `shell/task.sh` to add an MCP.
 
-**Auto-launch flags** — set these in your shell (or `~/.bashrc`) and every `task` starts that way
-(the container is the sandbox, so `auto`/`bypassPermissions` is reasonable):
+**Features** — optional capabilities applied to every task, set with **`task settings`** and stored
+in `<workspace>/.workstation/.config` (a `key=value` file — **not** host env vars, so your shell
+environment stays clean). They take effect on the next task, no rebuild:
 
-```bash
-export WORKSTATION_CLAUDE_MODE=auto      # --permission-mode: auto | acceptEdits | bypassPermissions | default
-export WORKSTATION_CLAUDE_MODEL=opus     # --model: alias or full id
-export WORKSTATION_CLAUDE_EFFORT=high    # --effort: low | medium | high | xhigh | max
-```
+| Feature | Effect |
+|---|---|
+| `notify` | `terminal_bell` → bell + flash when Claude is done / needs you (native; via `claude --settings`) |
+| `lang` | Claude UI language code (e.g. `fr`) |
+| `theme` | `dark` / `light` / … |
+| `statusline` | `off` to disable the status line |
+| `dns` | reliable resolvers for the container, e.g. `1.1.1.1 8.8.8.8` (flaky-network hotspots) |
+| `claude_mode` / `claude_model` / `claude_effort` | launch defaults: `--permission-mode` / `--model` / `--effort` (the container is the sandbox, so `auto` is reasonable) |
+
+> Each also accepts an ad-hoc env override (`WORKSTATION_NOTIFY`, `WORKSTATION_CLAUDE_MODE`, …) for a
+> one-off, but we never write those to your `~/.bashrc`.
 
 > Everything Claude does stays in the container. The image uses a `dev` user
 > with **uid 1000** so host-mounted files (clone, credentials) are readable. Docker **auto-falls back
@@ -161,8 +168,8 @@ docker won't restart). It **won't edit an existing `daemon.json`** — it prints
 instead. Skip entirely with `--no-ipv6` (or `WORKSTATION_IPV6=0`); on a host without IPv6 it's
 skipped on its own. Requires a recent Docker (NAT66 / `ip6tables` is stable since Docker 27).
 
-Still-flaky DNS on a given network (e.g. a phone hotspot)? Set `WORKSTATION_DNS="1.1.1.1 8.8.8.8"`
-and `task` passes those resolvers to the container.
+Still-flaky DNS on a given network (e.g. a phone hotspot)? Set the `dns` feature (`task settings`, or
+a one-off `WORKSTATION_DNS="1.1.1.1 8.8.8.8"`) and `task` passes those resolvers to the container.
 
 ## Image
 
