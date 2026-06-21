@@ -184,38 +184,81 @@ _task_cleanup(){
 
 # settings: show + edit optional features. Stored in <ws>/.config (NOT host env), applied to the next
 # task. Features: notify (terminal bell), lang, theme, dns, and the Claude launch defaults.
+# The editable feature keys, in display order.
+_task_setting_keys(){ printf '%s\n' notify memory lang theme statusline dns claude_mode claude_model claude_effort; }
+
+# One-line hint shown for a setting (allowed values / format + what "clear" means).
+_task_setting_hint(){ case "$1" in
+  notify)        echo 'terminal_bell (bell+flash when Claude is done/needs you) · clear = off' ;;
+  memory)        echo 'repo (per-repo, default) · global (all repos) · off (per task)' ;;
+  lang)          echo 'Claude UI language code, e.g. fr / en / pt-BR · clear = Claude default' ;;
+  theme)         echo 'dark · light · dark-daltonized · light-daltonized · clear = default' ;;
+  statusline)    echo 'off = hide the status line · clear = keep the default/imported one' ;;
+  dns)           echo 'space-separated IPs, e.g. "1.1.1.1 8.8.8.8" · clear = host resolver' ;;
+  claude_mode)   echo 'auto · acceptEdits · bypassPermissions · default' ;;
+  claude_model)  echo 'alias (opus/sonnet/haiku) or a full model id · clear = default' ;;
+  claude_effort) echo 'low · medium · high · xhigh · max' ;;
+esac; }
+
+# Validate value $2 for setting $1. On failure, return 1 and set _TASK_SETTING_ERR. Enums are strict
+# (so typos are caught, not silently ignored); open-ended ones are format-checked.
+_task_setting_validate(){
+  local k="$1" v="$2" t; _TASK_SETTING_ERR=""
+  case "$k" in
+    notify)        case "$v" in terminal_bell) return 0 ;; *) _TASK_SETTING_ERR="notify must be 'terminal_bell' (or clear with \"-\" to turn off)";; esac ;;
+    memory)        case "$v" in repo|global|off) return 0 ;; *) _TASK_SETTING_ERR="memory must be: repo | global | off";; esac ;;
+    statusline)    case "$v" in off) return 0 ;; *) _TASK_SETTING_ERR="statusline only takes 'off' (clear with \"-\" to re-enable)";; esac ;;
+    claude_mode)   case "$v" in auto|acceptEdits|bypassPermissions|default) return 0 ;; *) _TASK_SETTING_ERR="mode must be: auto | acceptEdits | bypassPermissions | default";; esac ;;
+    claude_effort) case "$v" in low|medium|high|xhigh|max) return 0 ;; *) _TASK_SETTING_ERR="effort must be: low | medium | high | xhigh | max";; esac ;;
+    claude_model)  case "$v" in *[!a-zA-Z0-9._-]*) _TASK_SETTING_ERR="model: letters, digits, . _ - only";; *) return 0 ;; esac ;;
+    lang)          case "$v" in *[!a-zA-Z_-]*|'') _TASK_SETTING_ERR="lang: a code like fr, en, pt-BR (letters, - or _)";; *) return 0 ;; esac ;;
+    theme)         case "$v" in [a-z]*[!a-z-]*) _TASK_SETTING_ERR="theme: lowercase letters/hyphens, e.g. dark / light-daltonized";; [a-z]*) return 0 ;; *) _TASK_SETTING_ERR="theme: lowercase letters/hyphens, e.g. dark / light-daltonized";; esac ;;
+    dns)           for t in $v; do case "$t" in *[!0-9a-fA-F.:]*|'') _TASK_SETTING_ERR="dns: space-separated IPs, e.g. 1.1.1.1 8.8.8.8"; return 1 ;; esac; done; return 0 ;;
+  esac
+  return 1
+}
+
+# Pretty current value for the list (— when unset; note the effective default).
+_task_setting_show(){ local v; v="$(_task_cfg "$1")"
+  if [ -n "$v" ]; then printf '%s' "$v"; else case "$1" in
+    memory) printf 'repo (default)' ;; notify) printf 'off' ;; *) printf '—' ;; esac; fi; }
+
+# settings: a MENU — pick a feature to change (no need to step through all of them), with validation
+# (invalid values are rejected, not silently accepted). Stored in <ws>/.config (no host env).
 _task_settings(){
-  local ws_dir base cf; ws_dir="$(_task_wsdir)"; base="$(_task_base)"; cf="$(_task_cfg_file)"
-  echo "Workstation settings:"
-  echo "  workspace / .workstation:  $ws_dir"
-  echo "  task clones:               $base"
-  echo "  imported host prefs:       $([ -f "$ws_dir/.claude/statusline.sh" ] && echo 'yes (statusline)' || echo no)"
-  echo "  config file:               $cf"
-  echo "  Features (apply to the next task):"
-  local k v
-  for k in memory notify lang theme statusline dns claude_mode claude_model claude_effort; do
-    v="$(_task_cfg "$k")"; [ "$k" = memory ] && [ -z "$v" ] && v="repo (default)"
-    printf '    %-13s %s\n' "$k" "${v:-—}"
-  done
-  echo "  (paths/prefs are set by re-running install; these features need no rebuild.)"
-  [ -r /dev/tty ] || return 0
-  printf '\nEdit features now? [y/N]: '; local a; read -r a < /dev/tty || a=n
-  case "$a" in y|Y|yes|YES) ;; *) return 0 ;; esac
-  echo "(Enter = keep current · \"-\" = clear · or type a new value)"
-  local spec key prompt cur ans
-  for spec in \
-    'memory|auto-memory persistence: repo (per-repo, default) / global (all repos) / off (per task)' \
-    'notify|notifications: terminal_bell (bell+flash when Claude is done / needs you), empty = off' \
-    'lang|Claude UI language code, e.g. fr / en (empty = Claude default)' \
-    'theme|theme: dark / light / … (empty = default)' \
-    'statusline|status line: off = disable it (empty = keep the image default / imported one)' \
-    'dns|reliable DNS, space-separated IPs e.g. "1.1.1.1 8.8.8.8" (empty = host resolver)' \
-    'claude_mode|permission mode: auto / acceptEdits / bypassPermissions / default' \
-    'claude_model|model: an alias (opus/sonnet) or a full id' \
-    'claude_effort|effort: low / medium / high / xhigh / max'; do
-    key="${spec%%|*}"; prompt="${spec#*|}"; cur="$(_task_cfg "$key")"
-    printf '  %s\n    [now: %s] > ' "$prompt" "${cur:-none}"; read -r ans < /dev/tty || ans=""
-    case "$ans" in '') ;; '-') _task_cfg_set "$key" "" ;; *) _task_cfg_set "$key" "$ans" ;; esac
+  local cf; cf="$(_task_cfg_file)"
+  local -a keys; mapfile -t keys < <(_task_setting_keys)
+  if ! { true >/dev/tty; } 2>/dev/null; then          # non-interactive: just print the values
+    echo "Workstation features (config: $cf):"
+    local k; for k in "${keys[@]}"; do printf '  %-13s %s\n' "$k" "$(_task_setting_show "$k")"; done
+    return 0
+  fi
+  while :; do
+    echo
+    echo "Workstation features  (saved to $cf · applied to the next task):"
+    local i=1 k
+    for k in "${keys[@]}"; do printf '  %2d) %-13s %s\n' "$i" "$k" "$(_task_setting_show "$k")"; i=$((i+1)); done
+    printf '  Edit which? [number or name · q to finish]: '
+    local pick; read -r pick < /dev/tty || break
+    case "$pick" in
+      ''|q|Q|quit|done) break ;;
+      *[!0-9]*) k="$pick" ;;                          # a name
+      *) k="${keys[$((pick-1))]:-}" ;;               # a number
+    esac
+    _task_setting_keys | grep -qxF "${k:-}" || { echo "  ? no such setting: '$pick'"; continue; }
+    # edit loop for this key, with validation
+    local cur ans
+    while :; do
+      cur="$(_task_cfg "$k")"
+      printf '  %s\n    %s\n    [now: %s · Enter=keep · "-"=clear] > ' "$k" "$(_task_setting_hint "$k")" "${cur:-none}"
+      read -r ans < /dev/tty || break
+      case "$ans" in
+        '') break ;;
+        '-') _task_cfg_set "$k" ""; echo "  ✓ $k cleared"; break ;;
+        *) if _task_setting_validate "$k" "$ans"; then _task_cfg_set "$k" "$ans"; echo "  ✓ $k = $ans"; break
+           else echo "  ✗ $_TASK_SETTING_ERR"; fi ;;
+      esac
+    done
   done
   echo "✓ Saved to $cf — applies to the next task (no host environment touched)."
 }
