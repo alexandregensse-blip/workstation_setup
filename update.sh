@@ -54,20 +54,15 @@ changed="$(git -C "$WS_DIR" diff --name-only "$before" "$after" 2>/dev/null || t
 needs_base=0; needs_thin=0; task_changed=0
 while IFS= read -r f; do [ -z "$f" ] && continue
   case "$f" in
-    Dockerfile.base)                     needs_base=1 ;;                 # toolchain layer
-    Dockerfile|claude/*|dev/*|plugins/*) needs_thin=1 ;;                 # config / plugins layer
-    shell/task.sh)                       task_changed=1 ;;               # shell function (no rebuild)
+    Dockerfile.base)            needs_base=1 ;;                          # toolchain layer
+    Dockerfile|claude/*|dev/*)  needs_thin=1 ;;                          # config layer
+    shell/task.sh)              task_changed=1 ;;                        # shell function (no rebuild)
   esac
 done <<< "$changed"
 dock image inspect workstation-base >/dev/null 2>&1 || needs_base=1      # missing → must build
 dock image inspect workstation      >/dev/null 2>&1 || needs_thin=1
 [ "$FRESH" = 1 ] && needs_base=1
 [ "$needs_base" = 1 ] && needs_thin=1                                    # base change ⇒ thin too
-
-# Keep the baked language + selected plugins across the rebuild.
-lang=""; dock image inspect workstation >/dev/null 2>&1 && \
-  lang="$(dock run --rm workstation jq -r '.language // empty' /home/dev/.claude/settings.json 2>/dev/null || true)"
-plugins="$(cat "$WS_DIR/.plugins" 2>/dev/null || true)"
 
 if [ "$needs_base" = 0 ] && [ "$needs_thin" = 0 ]; then
   [ "$before" != "$after" ] && echo "No image rebuild needed."
@@ -78,9 +73,8 @@ else
     if [ "$FRESH" = 1 ]; then dock build --pull --no-cache -f "$WS_DIR/Dockerfile.base" -t workstation-base "$WS_DIR"
     else                      dock build -f "$WS_DIR/Dockerfile.base" -t workstation-base "$WS_DIR"; fi
   fi
-  echo "Rebuilding workstation image (config + plugins)…"
-  dock build --build-arg "WS_LANG=$lang" --build-arg "WS_PLUGINS=$plugins" -t workstation "$WS_DIR"
-  if dock run --rm workstation test -f /home/dev/.claude/.audio-needed >/dev/null 2>&1; then : > "$WS_DIR/.audio"; else rm -f "$WS_DIR/.audio"; fi
+  echo "Rebuilding workstation image (config)…"
+  dock build -t workstation "$WS_DIR"
 fi
 
 echo "✓ Up to date."

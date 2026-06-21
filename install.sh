@@ -6,7 +6,7 @@
 # The host gets just: docker + git + gh (installed only if missing, and recorded so
 # uninstall.sh can offer to remove exactly those), plus the `task` command in ~/.bashrc.
 #
-# Flow: it asks ALL its questions up front (workspace, plugins, prefs, auth), then the
+# Flow: it asks ALL its questions up front (workspace, prefs, auth), then the
 # heavy work (image build + finalize) runs straight through with a live checklist.
 #
 # New machine, ONE command:
@@ -20,7 +20,6 @@
 #   --dir   <path>  (WORKSTATION_DIR)    where the workstation lives    [default <workspace>/.workstation]
 #   --lang  <code>  (WORKSTATION_LANG)   Claude UI language (image)     [default: unset / Claude default]
 #   --import-prefs | --no-import-prefs   import this machine's Claude prefs (statusline/lang/theme)  [default: ask]
-#   --plug-ins <list> (WORKSTATION_PLUGINS) opt-in plugins, comma-separated keys (see plugins/available)  [default: prompt]
 #   --no-ipv6 | --ipv6 (WORKSTATION_IPV6) enable Docker IPv6 (NAT66) for task containers  [default: auto — on if the host has routable IPv6]
 #   --yes | -y                           non-interactive (skip prompts)
 
@@ -39,7 +38,6 @@ WS_RUNNING="${WORKSTATION_RUNNING:-}"
 WS_DIR="${WORKSTATION_DIR:-}"
 WS_LANG="${WORKSTATION_LANG:-}"
 IMPORT_PREFS="${WORKSTATION_IMPORT_PREFS:-}"   # ""=ask, 1=yes, 0=no
-WS_PLUGINS="${WORKSTATION_PLUGINS:-}"          # space/comma-separated plugin keys ("" = prompt)
 WS_IPV6="${WORKSTATION_IPV6:-}"                # ""=auto (enable if host has routable IPv6), 1=force, 0=never
 ASSUME_YES=0
 WS_URL="https://github.com/alexandregensse-blip/workstation_setup"
@@ -52,11 +50,10 @@ while [ $# -gt 0 ]; do
     --lang)   WS_LANG="${2:?--lang requires a code}";   shift 2 ;;
     --import-prefs)    IMPORT_PREFS=1; shift ;;
     --no-import-prefs) IMPORT_PREFS=0; shift ;;
-    --plug-ins) WS_PLUGINS="${2:?--plug-ins requires a comma-separated list}"; shift 2 ;;
     --no-ipv6) WS_IPV6=0; shift ;;
     --ipv6)    WS_IPV6=1; shift ;;
     -y|--yes) ASSUME_YES=1; shift ;;
-    *) echo "unknown flag: $1  (use --home/--running/--dir/--lang/--import-prefs/--no-import-prefs/--plug-ins/--no-ipv6/--yes)"; exit 1 ;;
+    *) echo "unknown flag: $1  (use --home/--running/--dir/--lang/--import-prefs/--no-import-prefs/--no-ipv6/--yes)"; exit 1 ;;
   esac
 done
 
@@ -143,7 +140,7 @@ WS_RUNNING="${WS_RUNNING:-$WS_HOME/running}"
 log "sudo (cached for the rest of the install)"
 sudo -v
 
-# ===== Quick host work needed before the questions (prereqs give us gh; clone gives plugins list) =====
+# ===== Quick host work needed before the questions (prereqs give us gh; clone gives the repo) =====
 log "host prerequisites: docker, git, gh (install only what's missing)"
 need=""
 for pair in docker.io:docker git:git gh:gh; do have "${pair#*:}" || need="$need ${pair%:*}"; done
@@ -191,19 +188,6 @@ fi
 
 # ===== ALL THE QUESTIONS, up front =====
 log "setup — a few questions, then it builds on its own"
-
-# plugins
-if [ -z "$WS_PLUGINS" ] && [ "$ASSUME_YES" = 0 ] && [ -r /dev/tty ] && [ -f "$REPO_DIR/plugins/available" ]; then
-  sel=""
-  while IFS=$'\t' read -r pkey pdesc; do
-    case "$pkey" in ''|'#'*) continue ;; esac
-    printf '  Enable plugin "%s" — %s? [y/N]: ' "$pkey" "$pdesc"
-    read -r a < /dev/tty || a=n; case "$a" in y|Y|yes|YES) sel="$sel $pkey" ;; esac
-  done < "$REPO_DIR/plugins/available"
-  WS_PLUGINS="$sel"
-fi
-WS_PLUGINS="$(printf '%s' "$WS_PLUGINS" | tr ',' ' ' | tr -s ' ' | sed 's/^ *//;s/ *$//')"
-echo "  → plugins: ${WS_PLUGINS:-none}"
 
 # import prefs decision (the actual import happens after the build, which has jq)
 if [ -z "$IMPORT_PREFS" ]; then
@@ -259,14 +243,12 @@ if dock image inspect workstation-base >/dev/null 2>&1; then ck_set 0 done "pres
 else build_phase 0 "$WS_DIR/.dl-base" -f "$REPO_DIR/Dockerfile.base" -t workstation-base "$REPO_DIR" || { echo "⚠ base build failed — see above."; exit 1; }
      ck_set 0 done "built"; fi
 
-# 1. workstation image (config + plugins, on top of the base)
+# 1. workstation image (config on top of the base)
 ck_set 1 doing
-prev_plugins="$(cat "$WS_DIR/.plugins" 2>/dev/null || true)"
-if ! dock image inspect workstation >/dev/null 2>&1 || [ "$WS_PLUGINS" != "$prev_plugins" ]; then
-  build_phase 1 "$WS_DIR/.dl-image" --build-arg "WS_LANG=$WS_LANG" --build-arg "WS_PLUGINS=$WS_PLUGINS" -t workstation "$REPO_DIR" || { echo "⚠ image build failed — see above."; exit 1; }
-  printf '%s' "$WS_PLUGINS" > "$WS_DIR/.plugins"; ck_set 1 done "built"
+if ! dock image inspect workstation >/dev/null 2>&1; then
+  build_phase 1 "$WS_DIR/.dl-image" -t workstation "$REPO_DIR" || { echo "⚠ image build failed — see above."; exit 1; }
+  ck_set 1 done "built"
 else ck_set 1 done "up to date"; fi
-if dock run --rm workstation test -f /home/dev/.claude/.audio-needed >/dev/null 2>&1; then : > "$WS_DIR/.audio"; else rm -f "$WS_DIR/.audio"; fi
 
 # 2. import preferences (apply the earlier decision; needs the image's jq)
 ck_set 2 doing

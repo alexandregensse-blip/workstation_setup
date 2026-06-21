@@ -2,11 +2,13 @@
 
 > **Status: PARKED — not done on purpose.** Captures the size analysis so we can slim later.
 > The image works; this is an optimization, not a bug.
+> **Update:** the plugin system (incl. peon-ping + its ffmpeg ~168 MB) was removed; the GNU userland
+> (grep/coreutils/util-linux/procps/… ~+13 MB) was added. The peon-ping lever below is now moot.
 
 ## Measured (uncompressed, on-disk via `docker images`)
 
-- `workstation-base` ≈ **816 MB**
-- `workstation` (with peon-ping) ≈ **1.06 GB**
+- `workstation-base` ≈ **829 MB** (was 816; +13 MB GNU userland)
+- `workstation` (no plugins) ≈ base + thin config layer
 
 Note: `docker images` shows the **uncompressed on-disk** size. The **compressed** size (registry /
 `docker pull`) is ~2.5× smaller (~250–300 MB for the base) — that's the "~194 MB" figure quoted

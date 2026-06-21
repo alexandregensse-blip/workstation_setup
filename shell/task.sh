@@ -167,13 +167,12 @@ _task_settings(){
   echo "Workstation settings:"
   echo "  workspace / .workstation (WORKSTATION_DIR):  $ws_dir"
   echo "  task clones      (WORKSTATION_RUNNING):      $base"
-  echo "  plugins:                                     $(cat "$ws_dir/.plugins" 2>/dev/null || echo none)"
   echo "  imported host prefs:                         $([ -f "$ws_dir/.claude/settings.json" ] && echo yes || echo no)"
   echo "  onboarding/account imported:                 $([ -f "$ws_dir/.claude/claude-keys.json" ] && echo yes || echo no)"
   echo "  Claude launch — mode:   ${WORKSTATION_CLAUDE_MODE:-default}"
   echo "                  model:  ${WORKSTATION_CLAUDE_MODEL:-default}"
   echo "                  effort: ${WORKSTATION_CLAUDE_EFFORT:-default}"
-  echo "  (plugins / language / paths are changed by re-running install or 'update' — they rebuild.)"
+  echo "  (paths are changed by re-running install or 'update'.)"
   [ -r /dev/tty ] || return 0
   printf '\nEdit the Claude launch defaults now? [y/N]: '; local a; read -r a < /dev/tty || a=n
   case "$a" in y|Y|yes|YES) ;; *) return 0 ;; esac
@@ -339,14 +338,6 @@ _task_run(){
   [ -n "$gname" ]  && gitenv+=(-e "GIT_AUTHOR_NAME=$gname"   -e "GIT_COMMITTER_NAME=$gname")
   [ -n "$gemail" ] && gitenv+=(-e "GIT_AUTHOR_EMAIL=$gemail" -e "GIT_COMMITTER_EMAIL=$gemail")
 
-  # audio passthrough for sound plugins (e.g. peon-ping) only if the image asked for it AND a host
-  # audio server is present — silent otherwise. uid 1000 matches.
-  local xdg="/run/user/$(id -u)"; local -a audio=()
-  if [ -f "$ws_dir/.audio" ] && [ -S "$xdg/pulse/native" ]; then
-    audio=(-e "XDG_RUNTIME_DIR=$xdg" -e "PULSE_SERVER=unix:$xdg/pulse/native" -v "$xdg/pulse/native:$xdg/pulse/native")
-    [ -f "$HOME/.config/pulse/cookie" ] && audio+=(-v "$HOME/.config/pulse/cookie:/home/dev/.config/pulse/cookie:ro")
-  fi
-
   # optional reliable DNS in the container (set WORKSTATION_DNS="1.1.1.1 8.8.8.8" if the network's
   # own DNS is flaky, e.g. a phone hotspot). Default: inherit the host resolver.
   local -a dns=() d; for d in ${WORKSTATION_DNS:-}; do dns+=(--dns "$d"); done
@@ -358,7 +349,6 @@ _task_run(){
     "${claude_auth[@]}" \
     "${cfg_mounts[@]}" \
     "${gitenv[@]}" \
-    "${audio[@]}" \
     "${dns[@]}" \
     "${session[@]}" \
     "${resume_env[@]}" \

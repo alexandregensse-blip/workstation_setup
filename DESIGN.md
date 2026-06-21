@@ -31,9 +31,8 @@ self-contained `<workspace>/.workstation` dir** — the host is left in its init
 | `install.sh` | One-command, idempotent installer (container-only). |
 | `uninstall.sh` | Reverses it, asking **point-by-point**, then recaps (see §13). |
 | `update.sh` | Pulls latest + rebuilds the image (see §12). |
-| `plugins/` | Opt-in plugin registry (`available`) + installer (`install-plugin.sh`) (see §5). |
 | `Dockerfile.base` | The heavy **`workstation-base`** image — the toolchain (Claude/Serena/rtk/uv + apk tools), built once and reused. |
-| `Dockerfile` | The thin **`workstation`** image (`FROM workstation-base`) — bakes config/hooks/plugins; rebuilt on changes. |
+| `Dockerfile` | The thin **`workstation`** image (`FROM workstation-base`) — bakes config/hooks; rebuilt on changes. |
 | `shell/task.sh` | The `task` shell function, **sourced straight from the clone**. |
 | `claude/CLAUDE.md` | Global code-exploration policy (Serena). Baked into the image at `~/.claude/CLAUDE.md`. |
 | `claude/settings.json` | Claude prefs **+ hooks** (Serena + rtk). Baked into the image. No hardcoded language. |
@@ -71,18 +70,8 @@ The prompt and `sudo` read from `/dev/tty`, so the pipe form stays interactive.
 | `--dir <path>`   | `WORKSTATION_DIR`   | where the workstation lives | `<workspace>/.workstation` |
 | `--lang <code>`  | `WORKSTATION_LANG`  | Claude UI language (baked in the image) | unset (Claude default) |
 | `--import-prefs` / `--no-import-prefs` | `WORKSTATION_IMPORT_PREFS` | import this machine's Claude prefs (statusline/lang/theme) | ask if a local Claude is found |
-| `--plug-ins <list>` | `WORKSTATION_PLUGINS` | opt-in plugins, comma-separated keys | prompt per known plugin |
 | `--no-ipv6` / `--ipv6` | `WORKSTATION_IPV6` | enable Docker IPv6 (NAT66) for task containers (see §7a) | auto — on if the host has routable IPv6 |
 | `--yes` / `-y`   | —                   | non-interactive (skip prompt) | — |
-
-**Plugins (opt-in, baked on demand).** `plugins/available` lists selectable plugins; install offers
-each (or takes `--plug-ins`). The chosen keys go to the build as `--build-arg WS_PLUGINS`, and the
-Dockerfile runs `plugins/install-plugin.sh sysdeps|user <key>` for each — so the default image is
-unchanged and one plugin can't break the build (each call is non-fatal). The selection is recorded
-in `.workstation/.plugins` (rebuild on change). If a plugin wants host audio it drops a marker in
-the image; install mirrors it to `.workstation/.audio`, and `task` then passes the PulseAudio/PipeWire
-socket through (uid 1000 matches; silent if the host has no audio server). First plugin: **peon-ping**
-(notification sounds + `ffmpeg`, hooks merged with Serena/rtk).
 
 Missing flag values fail fast with a clear message (guarded against `set -u`).
 
@@ -102,8 +91,8 @@ Missing flag values fail fast with a clear message (guarded against `set -u`).
    uninstaller, and **rolls back** if docker doesn't come back up. Skip with `--no-ipv6`; auto-skipped
    when the host has no IPv6.
 6. **Image build** — builds the heavy **`workstation-base`** (toolchain, from `Dockerfile.base`)
-   only if missing, then the thin **`workstation`** (config + plugins, `FROM workstation-base`),
-   passing `--build-arg WS_LANG`/`WS_PLUGINS`. Uses the `docker`-or-`sudo docker` wrapper (see §8).
+   only if missing, then the thin **`workstation`** (config + hooks, `FROM workstation-base`). Uses
+   the `docker`-or-`sudo docker` wrapper (see §8). Optional features are applied at run time, not baked.
 7. **`task` command** — auto-sourced in `~/.bashrc` (once), inside a `# >>> workstation >>>` …
    `# <<< workstation <<<` marked block that also exports `WORKSTATION_DIR`/`WORKSTATION_RUNNING`
    (and any `WORKSTATION_CLAUDE_*` launch defaults). The block sources `task` **straight from the
@@ -177,9 +166,9 @@ task slots                                    # list credential slots (independe
 Final image ≈ **194 MB**.
 
 **Two-layer build**: a heavy `workstation-base` (`Dockerfile.base`, the toolchain) built once and
-reused, and a thin `workstation` (`Dockerfile`, `FROM workstation-base`) for config/plugins — so
-changing language/plugins never re-downloads the toolchain. `update.sh` rebuilds only the layer
-whose inputs changed (§12).
+reused, and a thin `workstation` (`Dockerfile`, `FROM workstation-base`) for config/hooks — so
+changing the dotfiles never re-downloads the toolchain. `update.sh` rebuilds only the layer whose
+inputs changed (§12).
 
 ## 7a. Networking (containers ↔ Anthropic)
 
@@ -273,9 +262,8 @@ overwrites them.
 ```
 
 `git pull`s the clone, then rebuilds **only what the pull actually changed** — the base if
-`Dockerfile.base` moved, the thin image if config/plugins moved, or **nothing** if only docs/scripts
-changed — **keeping the baked language + plugins** (read from the current image and
-`.workstation/.plugins`). `--fresh` forces a from-scratch base (`--pull --no-cache`) to fetch the
+`Dockerfile.base` moved, the thin image if config moved, or **nothing** if only docs/scripts
+changed. `--fresh` forces a from-scratch base (`--pull --no-cache`) to fetch the
 latest Claude/Serena/rtk. Output is concise (git's transfer noise is suppressed). Flags: `--dir`,
 `--home`, `--fresh`, `--yes`. `task` is sourced from the clone, so a shell change is applied by
 `source ~/.bashrc` (or a new terminal).

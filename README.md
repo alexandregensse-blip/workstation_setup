@@ -38,7 +38,6 @@ curl -fsSL .../install.sh | bash -s -- --home ~/dev --yes
 | `--dir`   / `WORKSTATION_DIR`   | where the workstation lives | `<workspace>/.workstation` |
 | `--lang`  / `WORKSTATION_LANG`  | Claude UI language (baked in the image) | unset (Claude default) |
 | `--import-prefs` / `--no-import-prefs` | import this machine's Claude prefs (statusline/lang/theme) | ask if a local Claude is found |
-| `--plug-ins` / `WORKSTATION_PLUGINS` | opt-in plugins, comma-separated keys (see `plugins/available`) | prompt per known plugin |
 | `--no-ipv6` / `WORKSTATION_IPV6=0` | don't enable Docker IPv6 (NAT66) for task containers (see [Networking](#networking-ipv6)) | enable if the host has routable IPv6 |
 | `--yes` / `-y` | non-interactive (skip the prompt) | — |
 
@@ -144,20 +143,6 @@ If a Claude install is found on the machine, install offers to **import your loc
 mounts them read-only into task containers — the host `~/.claude` is only read. Force with
 `--import-prefs` / `--no-import-prefs`.
 
-## Plugins (opt-in)
-
-Extra capabilities are **baked into the image only when you ask for them** — the default image is
-unchanged. Pick them with `--plug-ins peon-ping[,…]`, or answer the per-plugin prompt at install.
-Known plugins live in `plugins/available`; each is installed by `plugins/install-plugin.sh` (add a
-line + a case to extend). Selected plugins are recorded in `<workspace>/.workstation/.plugins`, and
-the image is rebuilt when the selection changes.
-
-- **peon-ping** — Warcraft "peon" sounds when Claude finishes / needs you. Installs its official
-  way (downloads only the default sound packs, not the whole repo), merged alongside the Serena/rtk
-  hooks. It adds `ffmpeg` to the image (≈ +90 MB, **only** when enabled) and makes `task` pass the
-  host audio socket through (PulseAudio/PipeWire), so the sound plays on your speakers; silent if
-  the host has no audio server.
-
 ## Networking (IPv6)
 
 Task containers run on Docker's **default bridge**. On a **dual-stack** network (e.g. SFR fibre:
@@ -186,8 +171,8 @@ Base: **Chainguard Wolfi** (`cgr.dev/chainguard/wolfi-base`) — a minimal, **gl
 **Alpine (musl) is avoided** (it breaks them). Final image ≈ **194 MB**, `dev` user at uid 1000.
 
 Built in **two layers**: a heavy **`workstation-base`** (the toolchain, from `Dockerfile.base`)
-built **once and reused**, and the thin **`workstation`** (config + plugins, from `Dockerfile`,
-`FROM workstation-base`) rebuilt on changes — so changing plugins/language **never re-downloads the
+built **once and reused**, and the thin **`workstation`** (config + hooks, from `Dockerfile`,
+`FROM workstation-base`) rebuilt on changes — so changing the dotfiles **never re-downloads the
 toolchain**. `update.sh` rebuilds only what changed; `--fresh` forces a from-scratch base for the latest tools.
 
 ## Update
@@ -197,8 +182,8 @@ toolchain**. `update.sh` rebuilds only what changed; `--fresh` forces a from-scr
 ```
 
 Pulls the repo and rebuilds **only what changed** — the base if `Dockerfile.base` moved, the thin
-image if config/plugins moved, or **nothing** if only docs/scripts changed (no rebuild for nothing),
-keeping your language + plugins. `--fresh` forces a from-scratch base (`--pull --no-cache`) to fetch
+image if config moved, or **nothing** if only docs/scripts changed (no rebuild for nothing).
+`--fresh` forces a from-scratch base (`--pull --no-cache`) to fetch
 the latest Claude/Serena/rtk. The trailing `&& source ~/.bashrc` reloads `task` in your current
 shell if it changed — running the script is a child process, so it can't do that by itself.
 
