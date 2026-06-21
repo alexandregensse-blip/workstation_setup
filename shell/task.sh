@@ -473,6 +473,14 @@ _task_run(){
 
   _task_ignore_mcp "$dir"   # keep Serena/MCP artifacts out of git status (clone-local exclude)
 
+  # A short tab title ("<repo> - <topic>"), emitted from INSIDE the container at startup so it
+  # replaces the long 'docker run …' command that VTE-based terminals (Ptyxis/GNOME) put in the title.
+  # We do NOT disable Claude's own title management — once it sets a title, it takes over from here.
+  local _tb _repo _topic _title
+  _tb="$(basename "$dir")"; _repo="$(basename "$(dirname "$dir")")"; _topic="${_tb#*_}"
+  [ "$_topic" = "$_tb" ] && _topic=""                      # name was just a timestamp → no topic
+  _title="$_repo${_topic:+ - $_topic}"
+
   # Claude launch flags + optional features, read from the config (env override wins; 'task settings'
   # edits them). Launch flags: claude_mode → --permission-mode, claude_model → --model, claude_effort
   # → --effort. Features merged on top of the baked settings.json via `claude --settings <json>`:
@@ -535,6 +543,7 @@ _task_run(){
       [ -f /seed/claude-keys.json ] && { jq -s ".[0] * .[1]" "$cfg" /seed/claude-keys.json > /tmp/c1 2>/dev/null && mv /tmp/c1 "$cfg"; }
       jq ".projects[\"/work\"] += {hasTrustDialogAccepted:true, hasCompletedProjectOnboarding:true}" "$cfg" > /tmp/c2 2>/dev/null && mv /tmp/c2 "$cfg"
       [ "${WS_RESUME:-0}" = 1 ] && compgen -G "$CFG/projects/*/*.jsonl" >/dev/null 2>&1 && set -- --continue "$@"
+      [ -n "${WORKSTATION_TAB_TITLE:-}" ] && printf "\033]0;%s\a" "$WORKSTATION_TAB_TITLE"   # short tab title (Claude may update it later)
       exec claude "$@"' _ "${cflags[@]}")
     echo "task: Claude login '$slot'${slot:+ ($(_task_login_account "$slot" 2>/dev/null))}."
   elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
@@ -551,6 +560,7 @@ _task_run(){
       [ -f /seed/claude-keys.json ] && { jq -s ".[0] * .[1]" "$cfg" /seed/claude-keys.json > /tmp/c1 2>/dev/null && mv /tmp/c1 "$cfg"; }
       jq ".projects[\"/work\"] += {hasTrustDialogAccepted:true, hasCompletedProjectOnboarding:true}" "$cfg" > /tmp/c2 2>/dev/null && mv /tmp/c2 "$cfg"
       [ "${WS_RESUME:-0}" = 1 ] && compgen -G "$HOME/.claude/projects/*/*.jsonl" >/dev/null 2>&1 && set -- --continue "$@"
+      [ -n "${WORKSTATION_TAB_TITLE:-}" ] && printf "\033]0;%s\a" "$WORKSTATION_TAB_TITLE"   # short tab title (Claude may update it later)
       exec claude "$@"' _ "${cflags[@]}")
   else
     echo "task: no Claude login — create one with 'task auth <name>' (or set CLAUDE_CODE_OAUTH_TOKEN for headless)." >&2
@@ -571,6 +581,7 @@ _task_run(){
     --name "task-$slug" \
     -v "$dir:/work" -w /work \
     -e GH_TOKEN="$gh_token" \
+    -e WORKSTATION_TAB_TITLE="$_title" \
     "${claude_auth[@]}" \
     "${cfg_mounts[@]}" \
     "${gitenv[@]}" \

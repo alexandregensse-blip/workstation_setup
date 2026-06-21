@@ -143,7 +143,9 @@ task auth [<name> | rm <name>]                # manage Claude logins (independen
    `autoMemoryDirectory` is pointed (via the same `--settings`) at `/memory`, a mounted host dir under
    `<ws>/.memory/<repo>` (`memory=repo`, default) or `<ws>/.memory/_global` (`memory=global`), so it
    survives the disposable container and is shared by every task on the repo; `memory=off` keeps it
-   per-task. History stays per-clone — the two are separate mounts. Tab title is left to Claude.
+   per-task. History stays per-clone — the two are separate mounts. The container emits a short
+   `<repo> - <topic>` OSC tab title at startup (so VTE terminals don't leave the long `docker run`
+   command in the title); Claude may then update it as the session goes.
 7. **On exit** — container destroyed; clone kept on host. Delete it only when `git status` is
    clean **and** nothing is unpushed (`git log @{u}..` empty).
 8. **`task resume`** — lists existing clones in a **checkbox menu** (arrow keys, Space/Enter toggle,
