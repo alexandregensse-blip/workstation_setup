@@ -139,7 +139,10 @@ task slots                                    # list credential slots (independe
    - Claude: mounts `<workstation>/.claude/.credentials.json` **if it exists**, else uses
      `$CLAUDE_CODE_OAUTH_TOKEN`, else a clear error pointing to `task auth`.
 4. **Clone on the host** → `<base>/<repo>/<YYYYMMDD-HHMMSS>_<slug>` (just the timestamp if no
-   topic) — WIP survives the container.
+   topic) — WIP survives the container. Known **MCP artifacts** (Serena's `.serena/` — cache,
+   memories, project config) are added to the clone-LOCAL `.git/info/exclude` (never the repo's
+   committed `.gitignore`), so they don't pollute `git status` on the host or in the container and
+   vanish with the clone. Curated list in `_task_mcp_artifacts` (extend per MCP).
 5. **Branch** `task/<slug>` and push it.
 6. **Run** Claude inside the container: clone mounted at `/work`, `GH_TOKEN` injected, Claude
    credentials mounted read-only, memory/cpu limits, `--rm` (disposable). The conversation history

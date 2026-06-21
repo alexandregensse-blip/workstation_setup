@@ -82,6 +82,12 @@ So `task resume` (and `task open`) relaunch the disposable container and **conti
 off** (`claude --continue`) — handy after a reboot or a `docker restart`. A brand-new `task` starts
 fresh; a clone that has no saved history just opens normally.
 
+**MCP artifacts stay out of `git status`** — tools like Serena write a `.serena/` dir (cache,
+memories, project config) into the repo. `task` adds known MCP artifacts to the clone-local
+`.git/info/exclude` (never the repo's committed `.gitignore` — we don't impose our tooling on the
+project), so they're invisible to git on the host and in the container, and vanish with the clone.
+The list is curated (Serena today); extend `_task_mcp_artifacts` in `shell/task.sh` to add an MCP.
+
 **Auto-launch flags** — set these in your shell (or `~/.bashrc`) and every `task` starts that way
 (the container is the sandbox, so `auto`/`bypassPermissions` is reasonable):
 

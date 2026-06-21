@@ -236,6 +236,23 @@ _task_slots_cmd(){
   done
 }
 
+# Known MCP/tool artifacts to keep out of `git status`. We add these to the clone-LOCAL
+# .git/info/exclude — NOT the repo's committed .gitignore (we don't impose our tooling on the repo) —
+# so they're invisible to git on the host AND in the container, and vanish with the clone. There's no
+# generic "MCP → artifacts" registry, so this is a curated list: add a line when you add an MCP.
+# (Serena writes .serena/ — cache + memories + project config; rtk writes nothing into the repo.)
+_task_mcp_artifacts(){ printf '%s\n' '.serena/'; }
+_task_ignore_mcp(){
+  local dir="$1" marker='# workstation: MCP/tool artifacts (local-only)'
+  local exclude="$dir/.git/info/exclude"            # separate line: $dir isn't set yet on the local above
+  [ -d "$dir/.git" ] || return 0
+  mkdir -p "$dir/.git/info"
+  grep -qxF "$marker" "$exclude" 2>/dev/null || printf '\n%s\n' "$marker" >> "$exclude"
+  local p; while IFS= read -r p; do
+    [ -n "$p" ] && { grep -qxF "$p" "$exclude" 2>/dev/null || printf '%s\n' "$p" >> "$exclude"; }
+  done < <(_task_mcp_artifacts)
+}
+
 # Run the container for an existing clone dir (auth + mounts + docker run). Used by start and 'open'.
 _task_run(){
   local dir="$1" slug="$2" resume="${3:-}"
@@ -244,6 +261,8 @@ _task_run(){
 
   local gh_token; gh_token="$(gh auth token 2>/dev/null || true)"
   [ -z "$gh_token" ] && { echo "task: not logged into GitHub — run 'gh auth login' first."; return 1; }
+
+  _task_ignore_mcp "$dir"   # keep Serena/MCP artifacts out of git status (clone-local exclude)
 
   # Claude launch flags from env — set these (e.g. in ~/.bashrc) to apply to every task:
   #   WORKSTATION_CLAUDE_MODE   → --permission-mode (auto | acceptEdits | bypassPermissions | default)
