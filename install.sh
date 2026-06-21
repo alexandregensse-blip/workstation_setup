@@ -225,11 +225,14 @@ CFG_FILE="$WS_DIR/.config"
 if [ ! -f "$CFG_FILE" ]; then
   CL_MODE="${WORKSTATION_CLAUDE_MODE:-}"; CL_MODEL="${WORKSTATION_CLAUDE_MODEL:-}"; CL_EFFORT="${WORKSTATION_CLAUDE_EFFORT:-}"
   NOTIFY="${WORKSTATION_NOTIFY:-}"; THEME="${WORKSTATION_THEME:-}"; DNS="${WORKSTATION_DNS:-}"
+  CPUS="${WORKSTATION_CPUS:-}"; RAM="${WORKSTATION_RAM:-}"
   if [ "$ASSUME_YES" = 0 ] && [ -r /dev/tty ]; then
     if [ -z "$NOTIFY" ]; then
       printf '  Enable native notifications (terminal bell + flash when Claude is done / needs you)? [Y/n]: '
       read -r a < /dev/tty || a=y; case "$a" in n|N|no|NO) NOTIFY= ;; *) NOTIFY=terminal_bell ;; esac
     fi
+    if [ -z "$CPUS" ]; then printf '  CPUs per task container [default 2]: '; read -r CPUS < /dev/tty || CPUS=; fi
+    if [ -z "$RAM" ];  then printf '  RAM per task container (unit m/g) [default 4g]: '; read -r RAM < /dev/tty || RAM=; fi
     if [ -z "$CL_MODE$CL_MODEL$CL_EFFORT" ]; then
       printf '  Set Claude launch defaults for every task (mode / model / effort)? [y/N]: '
       read -r a < /dev/tty || a=n
@@ -240,12 +243,16 @@ if [ ! -f "$CFG_FILE" ]; then
       esac
     fi
   else [ -z "$NOTIFY" ] && NOTIFY=terminal_bell; fi   # default ON, even headless
+  # drop invalid cpus/ram so a typo can't make every task fail at 'docker run' (defaults 2/4g apply).
+  # Same bounds as 'task settings': cpus a number > 0; ram digits + unit m/g, > 0.
+  case "$CPUS" in *[1-9]*) case "$CPUS" in *[!0-9.]*|*.*.*|.) CPUS= ;; esac ;; *) CPUS= ;; esac
+  case "$RAM" in *[mMgG]) case "${RAM%[mMgG]}" in *[1-9]*) case "${RAM%[mMgG]}" in *[!0-9]*) RAM= ;; esac ;; *) RAM= ;; esac ;; *) RAM= ;; esac
   : > "$CFG_FILE"
-  for kv in "notify=$NOTIFY" "lang=$WS_LANG" "theme=$THEME" "dns=$DNS" \
+  for kv in "notify=$NOTIFY" "lang=$WS_LANG" "theme=$THEME" "dns=$DNS" "cpus=$CPUS" "ram=$RAM" \
             "claude_mode=$CL_MODE" "claude_model=$CL_MODEL" "claude_effort=$CL_EFFORT"; do
     [ -n "${kv#*=}" ] && echo "$kv" >> "$CFG_FILE"
   done
-  echo "  → features: notify=${NOTIFY:-off} lang=${WS_LANG:-default} mode=${CL_MODE:-default} model=${CL_MODEL:-default} effort=${CL_EFFORT:-default}"
+  echo "  → features: notify=${NOTIFY:-off} lang=${WS_LANG:-default} cpus=${CPUS:-2} ram=${RAM:-4g} mode=${CL_MODE:-default} model=${CL_MODEL:-default} effort=${CL_EFFORT:-default}"
 else
   echo "  → features: keeping existing $CFG_FILE (edit with 'task settings')"
 fi
@@ -333,8 +340,9 @@ task commands (isolated Claude session in a container):
   task [repo] [topic]                  → clones into $WS_RUNNING (repo prompted if omitted; topic → timestamp)
   task --here [repo] [topic]           → base = current directory
   task --at <path> [repo] [topic]      → base = given path
+  task resume / task list              → reopen & continue a task / status of all clones + logins
   task auth [<name>]                   → manage Claude logins (independent, self-refreshing)
-  task settings                        → notifications, language, memory, DNS, launch defaults
+  task settings                        → notifications, language, memory, cpus/ram, DNS, launch defaults
   e.g.  task claude-autodev fix-login
 EOF
 [ "${group_added:-0}" = 1 ] && printf '\nDocker: works now via sudo. Log out/in once to use it without sudo (group '\''docker'\'').\n'

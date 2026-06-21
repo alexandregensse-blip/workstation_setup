@@ -65,8 +65,9 @@ task <repo> [topic]              # start: repo fuzzy-matched to your gh repos; t
 task --here <repo> [topic]       # base = current directory
 task --at /path <repo> [topic]   # base = given path
 task resume                      # reopen task clones (pick some in a checkbox menu), each in a new tab, CONTINUING its Claude session
+task list                        # status of every clone: running/idle, which login, git state — plus a logins summary
 task cleanup [-y]                # delete clones that are clean AND fully pushed (asks; -y skips the prompt)
-task settings                    # show/edit features (notifications, language, theme, DNS, launch defaults)
+task settings                    # show/edit features (notifications, language, theme, cpus/ram, DNS, launch defaults)
 task auth                        # list Claude logins (account, free/busy, token expiry)
 task auth <name>                 # browser-login into <name> — an independent, self-refreshing login
 task auth rm <name>              # remove a login
@@ -98,12 +99,13 @@ environment stays clean). They take effect on the next task, no rebuild:
 
 | Feature | Effect |
 |---|---|
-| `memory` | persist Claude's auto-memory across future tasks: `repo` (default — shared by all tasks on this repo), `global` (all repos), `off` (per-task). Stored in `.workstation/.memory/` |
+| `memory` | persist Claude's auto-memory across future tasks: `repo` (default — keyed by `<owner>-<repo>` so same-named repos from different owners stay separate), `global` (all repos), `off` (per-task). Stored in `.workstation/.memory/` |
 | `notify` | `terminal_bell` → bell + flash when Claude is done / needs you (native; via `claude --settings`) |
 | `lang` | Claude UI language code (e.g. `fr`) |
 | `theme` | `dark` / `light` / … |
 | `statusline` | `off` to disable the status line |
 | `dns` | reliable resolvers for the container, e.g. `1.1.1.1 8.8.8.8` (flaky-network hotspots) |
+| `cpus` / `ram` | container resource limits per task — `cpus` (e.g. `2`, `1.5`) and `ram` (e.g. `512m`, `4g`). Defaults `2` / `4g` |
 | `claude_mode` / `claude_model` / `claude_effort` | launch defaults: `--permission-mode` / `--model` / `--effort` (the container is the sandbox, so `auto` is reasonable) |
 
 > Each also accepts an ad-hoc env override (`WORKSTATION_NOTIFY`, `WORKSTATION_CLAUDE_MODE`, …) for a
@@ -133,6 +135,11 @@ task --at /srv/code site hotfix  # base = a given path
 task resume
 ```
 
+**See what's running and which login each task uses** (read-only; includes git state + logins):
+```bash
+task list
+```
+
 **Delete finished clones** — only those that are clean AND fully pushed are removed:
 ```bash
 task cleanup        # asks per clone
@@ -147,6 +154,12 @@ task settings       # set  notify = terminal_bell
 **Always launch Claude a certain way** (no per-task flags):
 ```bash
 task settings       # set  claude_mode = auto,  claude_model = opus,  claude_effort = high
+```
+
+**Cap (or raise) each task's container resources** (defaults 2 CPUs / 4g):
+```bash
+task settings                                  # set  cpus = 4,  ram = 8g
+WORKSTATION_CPUS=1 WORKSTATION_RAM=2g task autodev small-job   # or one-off
 ```
 
 **Override one setting for a single task** (env var — never written to your shell config):

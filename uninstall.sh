@@ -126,6 +126,20 @@ if [ -d "$WS_RUNNING" ] && [ -n "$(ls -A "$WS_RUNNING" 2>/dev/null)" ]; then
   else echo "  kept (delete manually if you want)"; note_kept "task clones ($WS_RUNNING)"; fi
 fi
 
+# 5b. clones made with --here/--at live OUTSIDE the workspace — we never delete outside it, just warn.
+if [ -f "$WS_DIR/.bases" ]; then
+  extra="$({ while IFS= read -r b; do
+      [ -n "$b" ] && [ "$b" != "$WS_RUNNING" ] && [ -d "$b" ] && find "$b" -mindepth 3 -maxdepth 3 -type d -name .git 2>/dev/null | sed 's#/\.git$##'
+    done < "$WS_DIR/.bases"; } | sort -u)"
+  if [ -n "$extra" ]; then
+    log "task clones outside $WS_RUNNING (--here/--at)"
+    echo "  These were made with --here/--at and live OUTSIDE the workspace — NOT deleted by uninstall:"
+    printf '%s\n' "$extra" | while IFS= read -r c; do printf '    - %s\n' "$c"; done
+    echo "  Remove them by hand if you want (we never delete outside the workspace)."
+    note_kept "clones outside running/ (--here/--at — listed above)"
+  fi
+fi
+
 # 6. the workstation dir itself (clone + Claude credentials + manifest) — LAST
 if [ -d "$WS_DIR" ]; then
   log "workstation dir"

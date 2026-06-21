@@ -5,11 +5,11 @@
     "padding": 0
   },
   "voice": {
-    "enabled": true,
+    "enabled": false,
     "mode": "hold"
   },
   "theme": "dark",
-  "voiceEnabled": true,
+  "voiceEnabled": false,
   "effortLevel": "xhigh",
   "hooks": {
     "SessionStart": [

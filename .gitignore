@@ -8,12 +8,16 @@
 /.docker-group-added
 /.docker-ipv6
 /.config
+/.bases
 /.dl-base
 /.dl-image
 /.claude/
 /.claude-slots/
 /.memory/
 /gh/
+
+# Local working notes (not part of the repo).
+/IMPROVEMENT_PLAN.md
 
 # Safety net: never commit credentials / secrets.
 .credentials.json

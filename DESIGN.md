@@ -34,6 +34,7 @@ self-contained `<workspace>/.workstation` dir** — the host is left in its init
 | `Dockerfile.base` | The heavy **`workstation-base`** image — the toolchain (Claude/Serena/rtk/uv + apk tools), built once and reused. |
 | `Dockerfile` | The thin **`workstation`** image (`FROM workstation-base`) — bakes config/hooks; rebuilt on changes. |
 | `shell/task.sh` | The `task` shell function, **sourced straight from the clone**. |
+| `.github/workflows/shellcheck.yml` | CI lint (shellcheck) over the shell scripts; signal-only. |
 | `claude/CLAUDE.md` | Global code-exploration policy (Serena). Baked into the image at `~/.claude/CLAUDE.md`. |
 | `claude/settings.json` | Claude prefs **+ hooks** (Serena + rtk). Baked into the image. No hardcoded language. |
 | `claude/statusline.sh` | Custom status line. Baked into the image. |
@@ -113,8 +114,9 @@ Missing flag values fail fast with a clear message (guarded against `set -u`).
 ```
 task [--here | --at <path>] [repo] [topic]   # start a task (runs in the current tab)
 task resume                                   # reopen clones (checkbox menu), each in a new tab, CONTINUE its Claude session
+task list                                     # read-only status of all clones (running/idle, login, git state) + logins
 task cleanup [-y]                             # delete clones that are clean AND fully pushed
-task settings                                 # show/edit features (notifications, language, theme, DNS, launch defaults)
+task settings                                 # show/edit features (notifications, language, theme, cpus/ram, DNS, launch defaults)
 task auth [<name> | rm <name>]                # manage Claude logins (independent, self-refreshing; see §8)
 ```
 
@@ -134,26 +136,35 @@ task auth [<name> | rm <name>]                # manage Claude logins (independen
    vanish with the clone. Curated list in `_task_mcp_artifacts` (extend per MCP).
 5. **Branch** `task/<slug>` and push it.
 6. **Run** Claude inside the container: clone mounted at `/work`, `GH_TOKEN` injected, Claude
-   credentials mounted read-only, memory/cpu limits, `--rm` (disposable). The conversation history
+   credentials mounted read-only, `--rm` (disposable). Resource limits are configurable: `cpus`/`ram`
+   from `<ws>/.config` → `--cpus`/`--memory` (defaults `2` / `4g`). The conversation history
    is persisted on the host under the clone's `.git/claude-projects` (out of the worktree, removed
    with the clone). **Features** from `<ws>/.config` (`task settings`) apply here: `claude_mode`/
    `claude_model`/`claude_effort` → launch flags; `notify`/`lang`/`theme`/`statusline` → merged onto
-   the baked settings.json via `claude --settings '{…}'` (so the baked Serena/rtk hooks are kept);
+   the baked settings.json via `claude --settings '{…}'`. That JSON is assembled **inside the
+   container with jq** (the feature values are passed as `WS_*` env vars) — so it's always well-formed
+   even for ad-hoc env overrides, and the host needs no jq; the baked Serena/rtk hooks are kept.
    `dns` → `--dns`. **Auto-memory** persists across *future* tasks (not just this clone): Claude's
    `autoMemoryDirectory` is pointed (via the same `--settings`) at `/memory`, a mounted host dir under
-   `<ws>/.memory/<repo>` (`memory=repo`, default) or `<ws>/.memory/_global` (`memory=global`), so it
+   `<ws>/.memory/<owner>-<repo>` (`memory=repo`, default — keyed by the clone's origin so same-named
+   repos from different owners stay separate) or `<ws>/.memory/_global` (`memory=global`), so it
    survives the disposable container and is shared by every task on the repo; `memory=off` keeps it
    per-task. History stays per-clone — the two are separate mounts. The container emits a short
    `<repo> - <topic>` OSC tab title at startup (so VTE terminals don't leave the long `docker run`
-   command in the title); Claude may then update it as the session goes.
+   command in the title); Claude may then update it as the session goes. The container name is
+   `task-<repo>-<clone>` (stable across start/resume; a natural guard against running a clone twice).
 7. **On exit** — container destroyed; clone kept on host. Delete it only when `git status` is
    clean **and** nothing is unpushed (`git log @{u}..` empty).
 8. **`task resume`** — lists existing clones in a **checkbox menu** (arrow keys, Space/Enter toggle,
    "Confirmer"), opens each pick in a **new terminal tab** (`task open`, propagating the current
    `WORKSTATION_*` settings since the tab is spawned by the terminal, not this shell) and relaunches
-   the container with `claude --continue` so the saved conversation resumes. **`task cleanup`**
-   removes clones that are clean and fully pushed; **`task settings`** shows install choices and
-   edits the launch defaults in the `~/.bashrc` block.
+   the container with `claude --continue` so the saved conversation resumes. **`task list`** is a
+   read-only status view (running/idle, which login, git state, + a logins summary; running containers
+   are matched to clones by their `/work` mount source via `docker inspect --format`, so no host jq).
+   **`task cleanup`** removes clones that are clean and fully pushed; **`task settings`** edits the
+   features in `<ws>/.config`. `resume`/`list`/`cleanup` scan the default `running/` base **plus** any
+   base used via `--here`/`--at`, recorded in `<ws>/.bases` (so those clones aren't lost). The git
+   "clean + pushed" check is one shared helper (`_task_git_state`) used by both `list` and `cleanup`.
 
 ## 7. The Docker image (`Dockerfile`)
 
@@ -285,7 +296,8 @@ removed vs kept.
   marker shows we added it); the **Docker IPv6 `daemon.json`** (only if a `.docker-ipv6` marker shows
   install created it — restarts docker); your **task clones** under `running` — **git-scanned first**,
   so it lists exactly which clones still have uncommitted or unpushed work before you decide; and the
-  `<workspace>/.workstation` dir (clone + Claude credentials).
+  `<workspace>/.workstation` dir (clone + Claude credentials). Clones made with `--here`/`--at` live
+  **outside** the workspace and are **never deleted** — uninstall just lists them (from `<ws>/.bases`).
 - **Never touches**: `~/.claude` (never created), your gh login, or any tool you already had.
 - Flags: `--dir`, `--home`, `--yes` (assume yes to every prompt).
 

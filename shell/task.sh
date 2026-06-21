@@ -1,22 +1,35 @@
+# shellcheck shell=bash
 # task — open ISOLATED Claude sessions in disposable Docker containers.
 #
 #   task [--here | --at <path>] <repo> [topic]   start: repo fuzzy-matched to your gh repos
 #                                                (asks if ambiguous/none); topic → timestamp if omitted.
 #   task resume                                  reopen task clones in new tabs, CONTINUING the Claude session.
+#   task list                                    status of every clone: running/idle, login, git state + logins.
 #   task cleanup [-y]                            delete clones that are clean AND fully pushed (asks; -y skips).
-#   task settings                                show/edit features (notifications, language, memory, DNS, …).
+#   task settings                                show/edit features (notifications, language, memory, cpus/ram, DNS, …).
 #   task auth [<name> | rm <name>]               manage Claude logins (independent, self-refreshing accounts).
 #   task help                                    this help (also shown for: task, task -h/--help/?).
 #
 # Container-only: the host has NO Claude/Serena/rtk — they live in the 'workstation' image.
 # Clones on the HOST (WIP survives the disposable container). Auth: gh token via env + Claude
-# credentials from <workstation>/.claude. Docker auto-falls back to sudo if needed. No hardcoded paths.
+# credentials from <workstation>/.claude-slots/<login>. Docker auto-falls back to sudo if needed. No hardcoded paths.
 
 _task_base(){ printf '%s' "${WORKSTATION_RUNNING:-${WORKSTATION_HOME:-$HOME/dev}/running}"; }
 _task_wsdir(){ printf '%s' "${WORKSTATION_DIR:-${WORKSTATION_HOME:-$HOME/dev}/.workstation}"; }
 _task_dock(){ if docker info >/dev/null 2>&1; then echo docker; else echo "sudo docker"; fi; }
 _task_slots_dir(){ printf '%s' "$(_task_wsdir)/.claude-slots"; }
 _task_cfg_file(){ printf '%s' "$(_task_wsdir)/.config"; }
+_task_bases_file(){ printf '%s' "$(_task_wsdir)/.bases"; }
+
+# Tiny pure-bash JSON readers (the host has NO jq — only docker/git/gh). They extract ONE value for a
+# key that occurs once in Claude's small config files (e.g. emailAddress, expiresAt). Not a general
+# parser: same pragmatic trade-off as the .config reader. Empty output when the key is absent/null.
+_task_json_str(){ local f="$1" k="$2" v
+  v="$(grep -o "\"$k\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$f" 2>/dev/null | head -1)" || return 0
+  v="${v#*:}"; v="${v#*\"}"; v="${v%\"}"; printf '%s' "$v"; }
+_task_json_num(){ local f="$1" k="$2" v
+  v="$(grep -o "\"$k\"[[:space:]]*:[[:space:]]*[0-9]\+" "$f" 2>/dev/null | head -1)" || return 0
+  printf '%s' "${v##*[!0-9]}"; }
 
 # Read an optional-feature setting WITHOUT polluting the host environment: the persistent store is a
 # key=value file in <ws>/.config (parsed in pure bash — the host only has docker/git/gh, no jq). An
@@ -44,13 +57,15 @@ task — isolated Claude sessions in disposable containers.
                                                task/<slug>, runs Claude in a container.
   task resume                                  List existing task clones, pick some in a checkbox menu, reopen
                                                each in a new tab and CONTINUE its Claude conversation.
+  task list                                    Read-only status of every task clone (running/idle, which login,
+                                               git state) plus a logins summary. (aliases: ls, ps)
   task cleanup [-y]                            Delete task clones that are clean AND fully pushed.
                                                Asks per clone; -y / --yes deletes without asking.
                                                Clones with uncommitted or unpushed work are kept.
   task settings                                Show/edit features: notifications, language, theme, status
-                                               line, memory persistence, DNS, and the Claude launch
-                                               defaults. Stored in <ws>/.config (no host env), applied
-                                               to the next task.
+                                               line, memory persistence, DNS, container cpus/ram, and the
+                                               Claude launch defaults. Stored in <ws>/.config (no host env),
+                                               applied to the next task.
   task auth                                    List Claude logins (account, free/busy, token expiry).
   task auth <name>                             Browser-login into <name> — an INDEPENDENT, self-refreshing
                                                login (its own token, can be its own Anthropic account).
@@ -60,17 +75,43 @@ task — isolated Claude sessions in disposable containers.
 
 Features are configured with 'task settings' (stored in <ws>/.config, not host env). They apply to
 the next task with no rebuild: notifications (terminal bell), language, theme, status line, per-repo
-memory persistence, reliable DNS, and Claude launch defaults (permission-mode / model / effort — the
-container is the sandbox, so 'auto' is reasonable). Each also takes a one-off env override
-(WORKSTATION_NOTIFY, WORKSTATION_CLAUDE_MODE, …) that is never written to your shell.
+memory persistence, reliable DNS, container resource limits (cpus / ram), and Claude launch defaults
+(permission-mode / model / effort — the container is the sandbox, so 'auto' is reasonable). Each also
+takes a one-off env override (WORKSTATION_NOTIFY, WORKSTATION_CLAUDE_MODE, …) never written to your shell.
 
 (Note: 'man task' won't work — task is a shell function, not a man page. Use 'task help'.)
 EOF
 }
 
-# Print each task clone dir under the running base, one per line.
-_task_clones(){ local b; b="$(_task_base)"; [ -d "$b" ] || return 0
-  find "$b" -mindepth 3 -maxdepth 3 -type d -name .git 2>/dev/null | sed 's#/\.git$##' | sort; }
+# Print each task clone dir (absolute) under base $1, one per line. A clone is always
+# <base>/<repo>/<ts>_<slug> → its .git sits at depth 3 under ANY base (default or --here/--at).
+_task_clones(){ local b="$1"; [ -d "$b" ] || return 0
+  find "$b" -mindepth 3 -maxdepth 3 -type d -name .git 2>/dev/null | sed 's#/\.git$##'; }
+
+# Record a non-default base ($1) so resume/cleanup/list can find clones made with --here/--at. Stored
+# in <ws>/.bases (one path per line). Append-if-absent: a short-line `>>` is atomic under PIPE_BUF, so
+# concurrent launches don't corrupt it (no flock); duplicates are de-duped at read time anyway.
+_task_base_record(){ local b="$1" f; f="$(_task_bases_file)"
+  [ "$b" = "$(_task_base)" ] && return 0                    # default base is always scanned
+  mkdir -p "$(dirname "$f")"; touch "$f"
+  grep -qxF "$b" "$f" 2>/dev/null || printf '%s\n' "$b" >> "$f"; }
+
+# All task clones across the default base + every recorded base still on disk (de-duped, sorted).
+_task_all_clones(){ local def f b; def="$(_task_base)"; f="$(_task_bases_file)"
+  { _task_clones "$def"
+    [ -f "$f" ] && while IFS= read -r b; do [ -n "$b" ] && [ "$b" != "$def" ] && _task_clones "$b"; done < "$f"
+  } | sort -u; }
+
+# Pretty label for a clone path: strip the default base prefix, else show ~ for $HOME, else absolute.
+_task_clone_label(){ local c="$1" def; def="$(_task_base)"
+  case "$c" in "$def"/*) printf '%s' "${c#"$def"/}" ;; "$HOME"/*) printf '~/%s' "${c#"$HOME"/}" ;; *) printf '%s' "$c" ;; esac; }
+
+# Git state of a clone $1 → "clean" (clean AND fully pushed) or "uncommitted"/"unpushed"/both.
+# Shared by 'cleanup' (deletable iff clean) and 'list'. One definition, so they can't drift.
+_task_git_state(){ local d="$1" tag=""
+  [ -n "$(git -C "$d" status --porcelain 2>/dev/null)" ] && tag="uncommitted"
+  [ -n "$(git -C "$d" log --branches --not --remotes --oneline 2>/dev/null | head -1)" ] && tag="${tag:+$tag, }unpushed"
+  printf '%s' "${tag:-clean}"; }
 
 # Open <cmd> in a new terminal tab/window (best-effort; detects common emulators). The new shell is
 # interactive so 'task' (sourced from ~/.bashrc) is available, then runs <cmd>, then stays open.
@@ -81,7 +122,8 @@ _task_newtab(){
   # terminal/its daemon, NOT a child of this shell, so any ad-hoc env OVERRIDE set only in the current
   # shell wouldn't reach it; re-export those (if present) AFTER bashrc so the running shell's wins.
   for v in WORKSTATION_DIR WORKSTATION_RUNNING WORKSTATION_NOTIFY WORKSTATION_LANG WORKSTATION_THEME \
-           WORKSTATION_STATUSLINE WORKSTATION_DNS WORKSTATION_CLAUDE_MODE WORKSTATION_CLAUDE_MODEL WORKSTATION_CLAUDE_EFFORT; do
+           WORKSTATION_STATUSLINE WORKSTATION_DNS WORKSTATION_CPUS WORKSTATION_RAM \
+           WORKSTATION_CLAUDE_MODE WORKSTATION_CLAUDE_MODEL WORKSTATION_CLAUDE_EFFORT; do
     [ -n "${!v:-}" ] && pre+="export $v=$(printf %q "${!v}"); "
   done
   run="${pre}${cmd}; exec bash"
@@ -102,8 +144,8 @@ _task_newtab(){
 # aborts. UI is drawn on /dev/tty; the picks land in the global array _TASK_PICKED. Returns 1 if
 # nothing was chosen / aborted.
 _task_menu(){
-  _TASK_PICKED=()
-  [ -r /dev/tty ] || { echo "task: no TTY to choose."; return 1; }
+  _TASK_PICKED=(); _TASK_PICKED_IDX=()
+  { true >/dev/tty; } 2>/dev/null || return 2
   local -a items=("$@"); local n=${#items[@]}
   [ "$n" -gt 0 ] || return 1
   local -a sel; local j box key rest
@@ -143,7 +185,7 @@ _task_menu(){
     esac
   done
   printf '\033[?25h\n' > /dev/tty                                  # show cursor again
-  for ((j=0; j<n; j++)); do [ "${sel[j]}" = 1 ] && _TASK_PICKED+=("${items[j]}"); done
+  for ((j=0; j<n; j++)); do [ "${sel[j]}" = 1 ] && { _TASK_PICKED+=("${items[j]}"); _TASK_PICKED_IDX+=("$j"); }; done
   [ "${#_TASK_PICKED[@]}" -gt 0 ] || return 1
 }
 
@@ -181,43 +223,44 @@ _task_select(){
 
 # resume: choose existing clones and reopen each in its own tab.
 _task_resume(){
-  local b; b="$(_task_base)"
-  local -a clones; mapfile -t clones < <(_task_clones)
-  [ "${#clones[@]}" -gt 0 ] || { echo "task: no task clones under $b to resume."; return 0; }
-  local -a chosen=()
-  local -a rels=(); local c; for c in "${clones[@]}"; do rels+=("${c#"$b"/}"); done
-  _task_menu "${rels[@]}" || { echo "task: cancelled."; return 0; }
-  local r; for r in "${_TASK_PICKED[@]}"; do chosen+=("$b/$r"); done
-  [ "${#chosen[@]}" -gt 0 ] || { echo "task: nothing selected."; return 0; }
-  local d; for d in "${chosen[@]}"; do echo "→ opening ${d#"$b"/}"; _task_newtab "task open $(printf %q "$d")"; done
+  local -a clones; mapfile -t clones < <(_task_all_clones)
+  [ "${#clones[@]}" -gt 0 ] || { echo "task: no task clones to resume."; return 0; }
+  local -a labels=(); local c; for c in "${clones[@]}"; do labels+=("$(_task_clone_label "$c")"); done
+  _task_menu "${labels[@]}"; local rc=$?
+  [ "$rc" = 2 ] && { echo "task: no TTY to choose."; return 1; }
+  [ "$rc" = 0 ] || { echo "task: cancelled."; return 0; }
+  local i; for i in "${_TASK_PICKED_IDX[@]}"; do
+    echo "→ opening $(_task_clone_label "${clones[$i]}")"; _task_newtab "task open $(printf %q "${clones[$i]}")"
+  done
 }
 
 # cleanup: remove clones that are clean AND fully pushed (git-checked). Asks unless -y/--yes.
 _task_cleanup(){
   local yes=0; case "${1:-}" in -y|--yes) yes=1 ;; esac
-  local b; b="$(_task_base)"
-  local -a clones; mapfile -t clones < <(_task_clones)
-  [ "${#clones[@]}" -gt 0 ] || { echo "task: no task clones under $b."; return 0; }
-  local d tag removed=0 kept=0 a
+  local -a clones; mapfile -t clones < <(_task_all_clones)
+  [ "${#clones[@]}" -gt 0 ] || { echo "task: no task clones."; return 0; }
+  local d lbl state removed=0 kept=0 a
   for d in "${clones[@]}"; do
-    tag=""
-    [ -n "$(git -C "$d" status --porcelain 2>/dev/null)" ] && tag="uncommitted"
-    [ -n "$(git -C "$d" log --branches --not --remotes --oneline 2>/dev/null | head -1)" ] && tag="${tag:+$tag, }unpushed"
-    if [ -n "$tag" ]; then echo "  keep    ${d#"$b"/}  ($tag)"; kept=$((kept+1)); continue; fi
-    if [ "$yes" = 1 ]; then rm -rf "$d"; echo "  removed ${d#"$b"/}"; removed=$((removed+1))
+    lbl="$(_task_clone_label "$d")"; state="$(_task_git_state "$d")"
+    if [ "$state" != clean ]; then echo "  keep    $lbl  ($state)"; kept=$((kept+1)); continue; fi
+    if [ "$yes" = 1 ]; then rm -rf "$d"; echo "  removed $lbl"; removed=$((removed+1))
     elif [ -r /dev/tty ]; then
-      printf '  delete %s? (clean + pushed) [y/N]: ' "${d#"$b"/}"; read -r a < /dev/tty || a=n
+      printf '  delete %s? (clean + pushed) [y/N]: ' "$lbl"; read -r a < /dev/tty || a=n
       case "$a" in y|Y|yes|YES) rm -rf "$d"; echo "    removed"; removed=$((removed+1)) ;; *) kept=$((kept+1)) ;; esac
-    else echo "  (deletable) ${d#"$b"/}"; kept=$((kept+1)); fi
+    else echo "  (deletable) $lbl"; kept=$((kept+1)); fi
   done
-  find "$b" -mindepth 1 -maxdepth 1 -type d -empty -delete 2>/dev/null
+  # prune now-empty <repo> dirs under each scanned base (default + recorded)
+  local def f base; def="$(_task_base)"; f="$(_task_bases_file)"
+  { printf '%s\n' "$def"; [ -f "$f" ] && cat "$f"; } | sort -u | while IFS= read -r base; do
+    [ -d "$base" ] && find "$base" -mindepth 1 -maxdepth 1 -type d -empty -delete 2>/dev/null
+  done
   echo "cleanup: removed $removed, kept $kept  (clones with uncommitted/unpushed work are always kept)."
 }
 
 # settings: show + edit optional features. Stored in <ws>/.config (NOT host env), applied to the next
 # task. Features: notify (terminal bell), lang, theme, dns, and the Claude launch defaults.
 # The editable feature keys, in display order.
-_task_setting_keys(){ printf '%s\n' notify memory lang theme statusline dns claude_mode claude_model claude_effort; }
+_task_setting_keys(){ printf '%s\n' notify memory lang theme statusline dns cpus ram claude_mode claude_model claude_effort; }
 
 # One-line hint shown for a setting (allowed values / format + what "clear" means).
 _task_setting_hint(){ case "$1" in
@@ -227,6 +270,8 @@ _task_setting_hint(){ case "$1" in
   theme)         echo 'dark · light · dark-daltonized · light-daltonized · clear = default' ;;
   statusline)    echo 'off = hide the status line · clear = keep the default/imported one' ;;
   dns)           echo 'space-separated IPs, e.g. "1.1.1.1 8.8.8.8" · clear = host resolver' ;;
+  cpus)          echo 'CPUs per task, e.g. 2 or 1.5 (> 0) · clear = 2 (default)' ;;
+  ram)           echo 'RAM per task with a unit m/g, e.g. 512m / 4g · clear = 4g (default)' ;;
   claude_mode)   echo 'auto · acceptEdits · bypassPermissions · default' ;;
   claude_model)  echo 'alias (opus/sonnet/haiku) or a full model id · clear = default' ;;
   claude_effort) echo 'low · medium · high · xhigh · max' ;;
@@ -246,6 +291,10 @@ _task_setting_validate(){
     lang)          case "$v" in *[!a-zA-Z_-]*|'') _TASK_SETTING_ERR="lang: a code like fr, en, pt-BR (letters, - or _)";; *) return 0 ;; esac ;;
     theme)         case "$v" in [a-z]*[!a-z-]*) _TASK_SETTING_ERR="theme: lowercase letters/hyphens, e.g. dark / light-daltonized";; [a-z]*) return 0 ;; *) _TASK_SETTING_ERR="theme: lowercase letters/hyphens, e.g. dark / light-daltonized";; esac ;;
     dns)           for t in $v; do case "$t" in *[!0-9a-fA-F.:]*|'') _TASK_SETTING_ERR="dns: space-separated IPs, e.g. 1.1.1.1 8.8.8.8"; return 1 ;; esac; done; return 0 ;;
+    cpus)          case "$v" in ''|*[!0-9.]*|*.*.*|.) _TASK_SETTING_ERR="cpus: a positive number like 2 or 1.5";; *[1-9]*) return 0 ;; *) _TASK_SETTING_ERR="cpus must be > 0";; esac ;;
+    ram)           case "$v" in *[!0-9mMgG]*) _TASK_SETTING_ERR="ram: digits + unit m/g, e.g. 512m or 4g";;
+                     *[mMgG]) case "${v%[mMgG]}" in ''|*[!0-9]*) _TASK_SETTING_ERR="ram: digits + unit m/g, e.g. 512m or 4g";; *[1-9]*) return 0 ;; *) _TASK_SETTING_ERR="ram must be > 0";; esac ;;
+                     *) _TASK_SETTING_ERR="ram needs a unit m or g, e.g. 512m / 4g";; esac ;;
   esac
   return 1
 }
@@ -253,7 +302,7 @@ _task_setting_validate(){
 # Pretty current value for the list (— when unset; note the effective default).
 _task_setting_show(){ local v; v="$(_task_cfg "$1")"
   if [ -n "$v" ]; then printf '%s' "$v"; else case "$1" in
-    memory) printf 'repo (default)' ;; notify) printf 'off' ;; *) printf '—' ;; esac; fi; }
+    memory) printf 'repo (default)' ;; notify) printf 'off' ;; cpus) printf '2 (default)' ;; ram) printf '4g (default)' ;; *) printf '—' ;; esac; fi; }
 
 # Pickable value choices for a setting, one per line as "<stored-value>|<label>" (empty value =
 # clear/default). Returns 1 for free-form settings (lang/model/dns), which are typed instead.
@@ -363,8 +412,18 @@ _task_slot_reserve(){
   rm -f "$r" 2>/dev/null                                               # stale → clear and retry
   ln "$tmp" "$r" 2>/dev/null; rc=$?; rm -f "$tmp"; return "$rc"; }
 
-# The Anthropic account (email) behind login $1, read from its .claude.json (no secret).
-_task_login_account(){ jq -r '.oauthAccount.emailAddress // empty' "$(_task_slots_dir)/$1/.claude.json" 2>/dev/null; }
+# The Anthropic account (email) behind login $1, read from its .claude.json (no secret, no jq).
+_task_login_account(){ _task_json_str "$(_task_slots_dir)/$1/.claude.json" emailAddress; }
+
+# Token expiry of login $1 as an ISO-UTC string (or '?'). expiresAt is epoch MS; host `date` needs
+# the leading '@' to read an epoch (verified on uutils coreutils, not just GNU).
+_task_login_expiry(){ local ms; ms="$(_task_json_num "$(_task_slots_dir)/$1/.credentials.json" expiresAt)"
+  [ "${#ms}" -ge 12 ] && date -u -d "@$((ms/1000))" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo '?'; }
+
+# One formatted login row (name · free/busy · account · expiry) — shared by `task auth` and `task list`.
+_task_slot_line(){ local s="$1" acct busy
+  acct="$(_task_login_account "$s")"; busy="$(_task_slot_busy "$s" && echo '[busy]' || echo '[free]')"
+  printf '  %-14s %-6s %-32s token exp: %s\n' "$s" "$busy" "${acct:-?}" "$(_task_login_expiry "$s")"; }
 
 # Browser login into login $1 (its OWN independent token / account), written into the login dir via
 # CLAUDE_CONFIG_DIR. Returns 0 once .credentials.json exists. Used by 'task auth <name>' and the
@@ -413,7 +472,7 @@ _task_slot_acquire(){
 #   task auth <name>       browser login into <name> (create it, or re-login an expired one)
 #   task auth rm <name>    remove a login
 _task_auth(){
-  local sub="${1:-}" sdir s exp acct busy; sdir="$(_task_slots_dir)"
+  local sub="${1:-}" sdir s; sdir="$(_task_slots_dir)"
   case "$sub" in
     rm|remove|delete)
       local n="${2:-}"; [ -n "$n" ] || { echo "usage: task auth rm <name>"; return 1; }
@@ -437,12 +496,40 @@ _task_auth(){
     return 0
   fi
   echo "Claude logins (independent, self-refreshing):"
-  for s in "${authed[@]}"; do
-    exp="$(jq -r '(.claudeAiOauth.expiresAt/1000)|todate' "$sdir/$s/.credentials.json" 2>/dev/null || echo '?')"
-    acct="$(_task_login_account "$s")"; busy="$(_task_slot_busy "$s" && echo '[busy]' || echo '[free]')"
-    printf '  %-14s %-6s %-32s token exp: %s\n' "$s" "$busy" "${acct:-?}" "$exp"
-  done
+  for s in "${authed[@]}"; do _task_slot_line "$s"; done
   echo "  (task auth <name> to add · task auth rm <name> to remove)"
+}
+
+# list: read-only status of every task clone — running/idle, which login, git state — plus a logins
+# summary. Aggregates what 'auth' and 'cleanup' show via the shared helpers (so nothing drifts).
+_task_list(){
+  local dock; dock="$(_task_dock)"
+  # Map running workstation containers: /work mount source (= the clone) → slot label (= the login).
+  # Go templates → no jq on the host.
+  local -A run_slot=(); local cid line src slot
+  while IFS= read -r cid; do [ -n "$cid" ] || continue
+    line="$($dock inspect -f '{{range .Mounts}}{{if eq .Destination "/work"}}{{.Source}}{{end}}{{end}}|{{index .Config.Labels "workstation.slot"}}' "$cid" 2>/dev/null)" || continue
+    src="${line%%|*}"; slot="${line#*|}"; [ -n "$src" ] && run_slot["$src"]="$slot"
+  done < <($dock ps -q --filter ancestor=workstation 2>/dev/null)
+
+  local -a clones; mapfile -t clones < <(_task_all_clones)
+  local c found st
+  if [ "${#clones[@]}" -eq 0 ] && [ "${#run_slot[@]}" -eq 0 ]; then echo "task: no task clones."
+  else
+    echo "Tasks:"
+    for c in "${clones[@]}"; do
+      if [ -n "${run_slot[$c]+x}" ]; then slot="${run_slot[$c]}"
+        [ -n "$slot" ] && st="● running · login=$slot" || st="● running · headless"
+      else st="  idle"; fi
+      printf '  %-44s %-26s %s\n' "$(_task_clone_label "$c")" "$st" "$(_task_git_state "$c")"
+    done
+    for src in "${!run_slot[@]}"; do                          # running but clone dir is gone
+      found=0; for c in "${clones[@]}"; do [ "$c" = "$src" ] && { found=1; break; }; done
+      [ "$found" = 0 ] && printf '  %-44s %-26s %s\n' "$(_task_clone_label "$src")" "● running (clone gone)" "${run_slot[$src]:+login=${run_slot[$src]}}"
+    done
+  fi
+  local -a authed; mapfile -t authed < <(_task_slot_list); local s
+  if [ "${#authed[@]}" -gt 0 ]; then echo; echo "Logins:"; for s in "${authed[@]}"; do _task_slot_line "$s"; done; fi
 }
 
 # Known MCP/tool artifacts to keep out of `git status`. We add these to the clone-LOCAL
@@ -462,9 +549,21 @@ _task_ignore_mcp(){
   done < <(_task_mcp_artifacts)
 }
 
+# Memory key for a clone: "<owner>-<repo>" from its GitHub origin (lowercased, sanitized) so two
+# same-named repos from different owners don't share auto-memory. Falls back to the clone's parent dir
+# name (the short repo name) when there's no parseable github origin.
+_task_repo_key(){
+  local dir="$1" url r
+  url="$(git -C "$dir" remote get-url origin 2>/dev/null)" || url=""
+  r="${url%.git}"; r="${r#*github.com[:/]}"                 # owner/name for github http or ssh remotes
+  if [ -n "$r" ] && [ "$r" != "${url%.git}" ] && [[ "$r" == */* ]]; then
+    r="${r//\//-}"; r="${r,,}"; printf '%s' "${r//[^a-z0-9._-]/-}"
+  else printf '%s' "$(basename "$(dirname "$dir")")"; fi
+}
+
 # Run the container for an existing clone dir (auth + mounts + docker run). Used by start and 'open'.
 _task_run(){
-  local dir="$1" slug="$2" resume="${3:-}"
+  local dir="$1" resume="${3:-}"
   [ -d "$dir" ] || { echo "task: no clone at $dir"; return 1; }
   local ws_dir dock; ws_dir="$(_task_wsdir)"; dock="$(_task_dock)"
 
@@ -481,35 +580,47 @@ _task_run(){
   [ "$_topic" = "$_tb" ] && _topic=""                      # name was just a timestamp → no topic
   _title="$_repo${_topic:+ - $_topic}"
 
-  # Claude launch flags + optional features, read from the config (env override wins; 'task settings'
-  # edits them). Launch flags: claude_mode → --permission-mode, claude_model → --model, claude_effort
-  # → --effort. Features merged on top of the baked settings.json via `claude --settings <json>`:
-  # notify → preferredNotifChannel (terminal bell on done/needs-you), lang → language, theme → theme.
+  # Stable, unique container name derived from the clone (<repo>-<clone>) — identical for start and
+  # resume, and a natural guard against launching the same clone twice. The repo is included so two
+  # same-named clones under different bases (--here/--at) don't collide.
+  local _cname; _cname="task-${_repo}-${_tb}"; _cname="${_cname//[^a-zA-Z0-9_.-]/-}"
+  if [ -n "$($dock ps -aq --filter "name=^/${_cname}$" 2>/dev/null)" ]; then
+    echo "task: a container named '$_cname' already exists — this task may be running, or it's an orphan." >&2
+    echo "      free it with:  $dock rm -f $_cname" >&2
+    return 1
+  fi
+
+  # Claude launch flags from the config (env override wins; 'task settings' edits them):
+  # claude_mode → --permission-mode, claude_model → --model, claude_effort → --effort.
   local -a cflags=()
   local _m _md _ef; _m="$(_task_cfg claude_mode)"; _md="$(_task_cfg claude_model)"; _ef="$(_task_cfg claude_effort)"
   [ -n "$_m" ]  && cflags+=(--permission-mode "$_m")
   [ -n "$_md" ] && cflags+=(--model "$_md")
   [ -n "$_ef" ] && cflags+=(--effort "$_ef")
-  local _notify _lang _theme _sl _feat=""
+
+  # Optional features are passed as env vars and assembled into the `claude --settings` JSON INSIDE the
+  # container (with the image's jq) — so the JSON is always well-formed even for ad-hoc env overrides,
+  # and the host needs no jq. notify → preferredNotifChannel, lang → language, theme → theme,
+  # statusline=off → statusLine:null, memory → autoMemoryDirectory (below).
+  local _notify _lang _theme _sl
   _notify="$(_task_cfg notify)"; _lang="$(_task_cfg lang)"; _theme="$(_task_cfg theme)"; _sl="$(_task_cfg statusline)"
-  [ -n "$_notify" ] && _feat="$_feat\"preferredNotifChannel\":\"$_notify\","
-  [ -n "$_lang" ]   && _feat="$_feat\"language\":\"$_lang\","
-  [ -n "$_theme" ]  && _feat="$_feat\"theme\":\"$_theme\","
-  [ "$_sl" = off ]  && _feat="$_feat\"statusLine\":null,"
-  # Persist Claude's auto-memory ACROSS future tasks (it's per-repo by design, but each task is a
-  # fresh /work, so by default it'd be lost). 'memory': repo (default — shared by all tasks on this
-  # repo), global (shared across all repos), off (ephemeral per task). We point Claude's
-  # autoMemoryDirectory at a mounted host dir under <ws>/.memory (self-contained, no host pollution).
+
+  # Persist Claude's auto-memory ACROSS future tasks (per-repo by design, but each task is a fresh
+  # /work so it'd be lost). 'memory': repo (default — keyed by <owner>-<repo> from the clone's origin,
+  # so same-named repos from different owners stay separate), global (all repos), off (per task). We
+  # point autoMemoryDirectory at a mounted host dir under <ws>/.memory (self-contained, host-clean).
   local -a memmount=()
-  local _mem _repo _memdir; _mem="$(_task_cfg memory)"; [ -z "$_mem" ] && _mem=repo
+  local _mem _memdir _wsmem=""; _mem="$(_task_cfg memory)"; [ -z "$_mem" ] && _mem=repo
   if [ "$_mem" != off ]; then
-    _repo="$(basename "$(dirname "$dir")")"
-    [ "$_mem" = global ] && _memdir="$ws_dir/.memory/_global" || _memdir="$ws_dir/.memory/$_repo"
+    if [ "$_mem" = global ]; then _memdir="$ws_dir/.memory/_global"
+    else _memdir="$ws_dir/.memory/$(_task_repo_key "$dir")"; fi
     mkdir -p "$_memdir"
-    memmount=(-v "$_memdir:/memory")
-    _feat="$_feat\"autoMemoryDirectory\":\"/memory\","
+    memmount=(-v "$_memdir:/memory"); _wsmem=/memory
   fi
-  [ -n "$_feat" ] && cflags+=(--settings "{${_feat%,}}")
+  local -a featenv=(-e "WS_NOTIFY=$_notify" -e "WS_LANG=$_lang" -e "WS_THEME=$_theme" -e "WS_SL=$_sl" -e "WS_MEMDIR=$_wsmem")
+
+  # Docker resource limits (NOT the Claude auto-memory above): config 'cpus'/'ram', defaults 2 / 4g.
+  local _cpus _ram; _cpus="$(_task_cfg cpus)"; _ram="$(_task_cfg ram)"
 
   # Conversation history persists per-clone on the HOST (survives the disposable --rm container; resume
   # continues it). Inside .git/ so it's out of the worktree and removed with the clone. mkdir first so
@@ -543,6 +654,13 @@ _task_run(){
       [ -f /seed/claude-keys.json ] && { jq -s ".[0] * .[1]" "$cfg" /seed/claude-keys.json > /tmp/c1 2>/dev/null && mv /tmp/c1 "$cfg"; }
       jq ".projects[\"/work\"] += {hasTrustDialogAccepted:true, hasCompletedProjectOnboarding:true}" "$cfg" > /tmp/c2 2>/dev/null && mv /tmp/c2 "$cfg"
       [ "${WS_RESUME:-0}" = 1 ] && compgen -G "$CFG/projects/*/*.jsonl" >/dev/null 2>&1 && set -- --continue "$@"
+      S="$(jq -cn --arg n "$WS_NOTIFY" --arg l "$WS_LANG" --arg t "$WS_THEME" --arg s "$WS_SL" --arg m "$WS_MEMDIR" "{}
+        | (if \$n != \"\" then .preferredNotifChannel = \$n else . end)
+        | (if \$l != \"\" then .language = \$l else . end)
+        | (if \$t != \"\" then .theme = \$t else . end)
+        | (if \$s == \"off\" then .statusLine = null else . end)
+        | (if \$m != \"\" then .autoMemoryDirectory = \$m else . end)" 2>/dev/null)"
+      [ -n "$S" ] && [ "$S" != "{}" ] && set -- --settings "$S" "$@"
       [ -n "${WORKSTATION_TAB_TITLE:-}" ] && printf "\033]0;%s\a" "$WORKSTATION_TAB_TITLE"   # short tab title (Claude may update it later)
       exec claude "$@"' _ "${cflags[@]}")
     echo "task: Claude login '$slot'${slot:+ ($(_task_login_account "$slot" 2>/dev/null))}."
@@ -560,6 +678,13 @@ _task_run(){
       [ -f /seed/claude-keys.json ] && { jq -s ".[0] * .[1]" "$cfg" /seed/claude-keys.json > /tmp/c1 2>/dev/null && mv /tmp/c1 "$cfg"; }
       jq ".projects[\"/work\"] += {hasTrustDialogAccepted:true, hasCompletedProjectOnboarding:true}" "$cfg" > /tmp/c2 2>/dev/null && mv /tmp/c2 "$cfg"
       [ "${WS_RESUME:-0}" = 1 ] && compgen -G "$HOME/.claude/projects/*/*.jsonl" >/dev/null 2>&1 && set -- --continue "$@"
+      S="$(jq -cn --arg n "$WS_NOTIFY" --arg l "$WS_LANG" --arg t "$WS_THEME" --arg s "$WS_SL" --arg m "$WS_MEMDIR" "{}
+        | (if \$n != \"\" then .preferredNotifChannel = \$n else . end)
+        | (if \$l != \"\" then .language = \$l else . end)
+        | (if \$t != \"\" then .theme = \$t else . end)
+        | (if \$s == \"off\" then .statusLine = null else . end)
+        | (if \$m != \"\" then .autoMemoryDirectory = \$m else . end)" 2>/dev/null)"
+      [ -n "$S" ] && [ "$S" != "{}" ] && set -- --settings "$S" "$@"
       [ -n "${WORKSTATION_TAB_TITLE:-}" ] && printf "\033]0;%s\a" "$WORKSTATION_TAB_TITLE"   # short tab title (Claude may update it later)
       exec claude "$@"' _ "${cflags[@]}")
   else
@@ -578,18 +703,19 @@ _task_run(){
   local -a dns=() d; for d in $(_task_cfg dns); do dns+=(--dns "$d"); done
 
   $dock run -it --rm \
-    --name "task-$slug" \
+    --name "$_cname" \
     -v "$dir:/work" -w /work \
     -e GH_TOKEN="$gh_token" \
     -e WORKSTATION_TAB_TITLE="$_title" \
     "${claude_auth[@]}" \
     "${cfg_mounts[@]}" \
+    "${featenv[@]}" \
     "${gitenv[@]}" \
     "${dns[@]}" \
     "${session[@]}" \
     "${memmount[@]}" \
     "${resume_env[@]}" \
-    --memory=4g --cpus=2 \
+    --memory="${_ram:-4g}" --cpus="${_cpus:-2}" \
     workstation "${claude_cmd[@]}"
 
   [ -n "$slot" ] && rm -f "$(_task_resv_file "$slot")" 2>/dev/null   # free the login immediately on exit
@@ -602,6 +728,7 @@ task() {
     ''|-h|--help|help|man|'?') _task_help; return 0 ;;
     resume)   _task_resume; return $? ;;
     cleanup)  shift; _task_cleanup "$@"; return $? ;;
+    list|ls|ps) _task_list; return $? ;;
     settings) _task_settings; return $? ;;
     open)    [ -n "${2:-}" ] || { echo "usage: task open <clone-dir>"; return 1; }; _task_run "$2" "$(basename "$2")" resume; return $? ;;
     auth)    shift; _task_auth "$@"; return $? ;;
@@ -618,6 +745,9 @@ task() {
       *)      break ;;
     esac
   done
+  # Canonicalize the base so the clone path, the recorded base, and Docker's mount source all agree
+  # (so `task list` matches running containers to their clone, and `.bases` doesn't get dup entries).
+  base="$(realpath -m "$base" 2>/dev/null || printf '%s' "$base")"
 
   local repo="${1:-}" topic="${2:-}" orig="${1:-}"
 
@@ -629,7 +759,7 @@ task() {
       mapfile -t known < <(gh repo list --limit 200 --json nameWithOwner --jq '.[].nameWithOwner' 2>/dev/null)
       if [ -z "$repo" ]; then
         [ -r /dev/tty ] || { echo "usage: task [--here | --at <path>] <repo> [topic]   (try 'task help')"; return 1; }
-        echo "Which repo?"; repo="$(_task_pick "${known[@]}")" || { echo "task: no repo chosen."; return 1; }
+        repo="$(_task_pick "${known[@]}")" || { echo "task: no repo chosen."; return 1; }
       elif [ "${#known[@]}" -gt 0 ]; then
         local -a exact=() subs=(); local r name
         for r in "${known[@]}"; do
@@ -657,6 +787,7 @@ task() {
   if [ -n "$slug" ]; then dir="$base/${repo##*/}/${ts}_$slug"
   else slug="$ts"; dir="$base/${repo##*/}/$ts"; fi
   mkdir -p "$(dirname "$dir")"
+  _task_base_record "$base"           # so resume/cleanup/list find clones made with --here/--at
 
   gh repo clone "$repo" "$dir" || return 1
   ( cd "$dir" && git switch -c "task/$slug" && git push -u origin "task/$slug" )
@@ -664,16 +795,15 @@ task() {
   _task_run "$dir" "$slug"
 }
 
-# Keep the standalone _task_pick helper used by repo resolution.
+# Repo chooser used by repo resolution: the same arrow-key picker as 'resume'/'settings', plus a
+# "type manually" entry so owner/name or a URL is still accepted. Echoes the choice; 1 on cancel/no-TTY.
+# (The fast path — `task owner/name [topic]` — never reaches here; the picker only shows when the repo
+# is omitted, ambiguous, or unmatched.)
 _task_pick(){
-  [ -r /dev/tty ] || return 1
-  local -a opts=("$@"); local i=1 o pick
-  for o in "${opts[@]}"; do printf '  %2d) %s\n' "$i" "$o" >&2; i=$((i+1)); done
-  printf 'repo [number, or owner/name, or URL]: ' >&2
-  read -r pick < /dev/tty || return 1
-  case "$pick" in
-    '') return 1 ;;
-    *[!0-9]*) printf '%s\n' "$pick" ;;
-    *) local sel="${opts[$((pick-1))]:-}"; [ -n "$sel" ] && printf '%s\n' "$sel" || return 1 ;;
-  esac
+  local -a opts=("$@"); local manual='✎ type owner/name or a URL'
+  _task_select "Which repo?" "${opts[@]}" "$manual" || return 1
+  if [ "$_TASK_SEL" = "$manual" ]; then
+    printf 'repo (owner/name or URL) > ' > /dev/tty; local p; read -r p < /dev/tty || return 1
+    [ -n "$p" ] && printf '%s\n' "$p" || return 1
+  else printf '%s\n' "$_TASK_SEL"; fi
 }
