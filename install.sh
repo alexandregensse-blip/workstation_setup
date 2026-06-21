@@ -95,7 +95,14 @@ human_size(){ local b="$1"
 # estimated total (<est> MB, ~), live rate, elapsed seconds. 'downloaded' = host rx delta (approx).
 build_phase(){
   local idx="$1" calib="$2"; shift 2
-  if [ "$CK_TTY" != 1 ] || ! docker info >/dev/null 2>&1; then ck_dirty; dock build "$@"; return $?; fi
+  # No live progress meter possible (no TTY, or docker needs sudo — e.g. the first install before the
+  # docker group is active): build QUIETLY anyway, capturing output and showing it only on failure,
+  # so the install doesn't dump docker's whole step-by-step log. The checklist line marks it building.
+  if [ "$CK_TTY" != 1 ] || ! docker info >/dev/null 2>&1; then
+    ck_dirty; local _l; _l="$(mktemp)"
+    if dock build "$@" >"$_l" 2>&1; then rm -f "$_l"; return 0
+    else echo "  ✗ build failed — last lines:"; tail -30 "$_l"; rm -f "$_l"; return 1; fi
+  fi
   local logf t0 cur pid rc=0 ctr tx0 tx1 rate total=0 est=0 pct det
   logf="$(mktemp)"; t0=$SECONDS
   # docker0 tx = bytes the host pushes INTO containers ≈ the build's downloads (excludes browser/host).

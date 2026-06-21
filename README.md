@@ -36,7 +36,7 @@ curl -fsSL .../install.sh | bash -s -- --home ~/dev --yes
 | `--home`  / `WORKSTATION_HOME`  | workspace dir (clones + `.workstation`) | prompt, else `~/dev` |
 | `--running` / `WORKSTATION_RUNNING` | task clones base | `<workspace>/running` |
 | `--dir`   / `WORKSTATION_DIR`   | where the workstation lives | `<workspace>/.workstation` |
-| `--lang`  / `WORKSTATION_LANG`  | Claude UI language (baked in the image) | unset (Claude default) |
+| `--lang`  / `WORKSTATION_LANG`  | Claude UI language — seeds the `lang` feature (run-time, not baked) | unset (Claude default) |
 | `--import-prefs` / `--no-import-prefs` | import this machine's Claude prefs (statusline/lang/theme) | ask if a local Claude is found |
 | `--no-ipv6` / `WORKSTATION_IPV6=0` | don't enable Docker IPv6 (NAT66) for task containers (see [Networking](#networking-ipv6)) | enable if the host has routable IPv6 |
 | `--yes` / `-y` | non-interactive (skip the prompt) | — |
@@ -112,6 +112,74 @@ environment stays clean). They take effect on the next task, no rebuild:
 > with **uid 1000** so host-mounted files (clone, credentials) are readable. Docker **auto-falls back
 > to `sudo`** until the `docker` group is active (next login) — so it works right away.
 
+## Recipes (one per use case)
+
+**Start working on a repo** — `autodev` is fuzzy-matched against your GitHub repos; it clones, branches
+`task/fix-login`, and opens Claude in a disposable container:
+```bash
+task autodev fix-login
+```
+
+**Start from a repo you're already in** (base = current dir instead of `running/`):
+```bash
+cd ~/projects/site && task site hotfix
+task --here site hotfix          # equivalent, explicit
+task --at /srv/code site hotfix  # base = a given path
+```
+
+**Reopen earlier tasks and continue their Claude conversation** (checkbox menu; each reopens in a tab):
+```bash
+task resume
+```
+
+**Delete finished clones** — only those that are clean AND fully pushed are removed:
+```bash
+task cleanup        # asks per clone
+task cleanup -y     # no prompts
+```
+
+**Get notified when Claude finishes / needs you** (terminal bell + window flash):
+```bash
+task settings       # set  notify = terminal_bell
+```
+
+**Always launch Claude a certain way** (no per-task flags):
+```bash
+task settings       # set  claude_mode = auto,  claude_model = opus,  claude_effort = high
+```
+
+**Override one setting for a single task** (env var — never written to your shell config):
+```bash
+WORKSTATION_CLAUDE_MODEL=sonnet task autodev quick-experiment
+```
+
+**Persist what Claude learns about a repo across tasks** (per-repo by default; switch scope or disable):
+```bash
+task settings       # set  memory = repo (default) | global | off
+```
+
+**Run several long (hours/days) tasks in parallel** — one independent login per concurrent task:
+```bash
+task auth --slot a            # browser login, once per slot
+task auth --slot b
+task slots                    # see which are free / busy
+task autodev big-refactor     # auto-borrows a free slot
+task site i18n-migration      # borrows another
+```
+
+**Work on a flaky network** (phone hotspot, captive DNS):
+```bash
+task settings                              # set  dns = 1.1.1.1 8.8.8.8
+WORKSTATION_DNS="1.1.1.1 8.8.8.8" task site demo   # or one-off
+```
+
+**See / change everything** and **update / remove**:
+```bash
+task settings                              # show all features + edit
+~/dev/.workstation/update.sh && source ~/.bashrc   # latest; silent unless a build fails
+~/dev/.workstation/uninstall.sh            # remove, asking before each step
+```
+
 ## Auth
 
 - **GitHub** — host `gh` login (`gh auth token` passed to the container; a baked credential helper
@@ -180,7 +248,9 @@ a one-off `WORKSTATION_DNS="1.1.1.1 8.8.8.8"`) and `task` passes those resolvers
 
 Base: **Chainguard Wolfi** (`cgr.dev/chainguard/wolfi-base`) — a minimal, **glibc** "undistro"
 (~14 MB base, ~0 CVEs). glibc is required by the prebuilt binaries (Claude Code, rtk, uv);
-**Alpine (musl) is avoided** (it breaks them). Final image ≈ **194 MB**, `dev` user at uid 1000.
+**Alpine (musl) is avoided** (it breaks them). The image bundles the GNU userland (grep/coreutils/
+findutils/diffutils/util-linux/procps/…) so in-container scripts behave like a normal GNU box, not
+busybox. On-disk ≈ **830 MB** (Claude Code alone is ~234 MB); `dev` user at uid 1000.
 
 Built in **two layers**: a heavy **`workstation-base`** (the toolchain, from `Dockerfile.base`)
 built **once and reused**, and the thin **`workstation`** (config + hooks, from `Dockerfile`,
@@ -194,7 +264,8 @@ toolchain**. `update.sh` rebuilds only what changed; `--fresh` forces a from-scr
 ```
 
 Pulls the repo and rebuilds **only what changed** — the base if `Dockerfile.base` moved, the thin
-image if config moved, or **nothing** if only docs/scripts changed (no rebuild for nothing).
+image if config moved, or **nothing** if only docs/scripts changed (no rebuild for nothing). Builds
+are **quiet** — docker's step-by-step output is hidden and only shown if a build fails.
 `--fresh` forces a from-scratch base (`--pull --no-cache`) to fetch
 the latest Claude/Serena/rtk. The trailing `&& source ~/.bashrc` reloads `task` in your current
 shell if it changed — running the script is a child process, so it can't do that by itself.

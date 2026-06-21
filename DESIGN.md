@@ -68,7 +68,7 @@ The prompt and `sudo` read from `/dev/tty`, so the pipe form stays interactive.
 | `--home <path>`  | `WORKSTATION_HOME`  | workspace dir (clones + `.workstation`) | prompt, else `~/dev` |
 | `--running <path>` | `WORKSTATION_RUNNING` | task clones base | `<workspace>/running` |
 | `--dir <path>`   | `WORKSTATION_DIR`   | where the workstation lives | `<workspace>/.workstation` |
-| `--lang <code>`  | `WORKSTATION_LANG`  | Claude UI language (baked in the image) | unset (Claude default) |
+| `--lang <code>`  | `WORKSTATION_LANG`  | Claude UI language — seeds the `lang` feature (run-time, not baked) | unset (Claude default) |
 | `--import-prefs` / `--no-import-prefs` | `WORKSTATION_IMPORT_PREFS` | import this machine's Claude prefs (statusline/lang/theme) | ask if a local Claude is found |
 | `--no-ipv6` / `--ipv6` | `WORKSTATION_IPV6` | enable Docker IPv6 (NAT66) for task containers (see §7a) | auto — on if the host has routable IPv6 |
 | `--yes` / `-y`   | —                   | non-interactive (skip prompt) | — |
@@ -161,15 +161,18 @@ task slots                                    # list credential slots (independe
   the tools at build.
 - **`dev` user, uid 1000** — explicitly created to match the host user, so host-mounted files
   (clone, `0600` credentials) are readable. (A default new user would get uid 1001 and fail.)
-- **Tools**: bash, curl, git, ripgrep, **python3** (kept — `uv -p 3.13` reuses it, which makes
-  the image *smaller*: 194 MB vs 215 MB without), gh, jq, shadow (useradd), ca-certificates.
+- **Tools**: bash, curl, git, ripgrep, **python3** (kept — `uv -p 3.13` reuses it, avoiding a
+  second standalone Python), gh, jq, shadow (useradd), ca-certificates.
 - **Config baked in**: the policy, prefs + hooks, statusline and convention are COPYed into the
   image's `~/.claude` and `~/dev` — so the container is fully configured with no host deployment.
-- **Language**: `ARG WS_LANG` injected into the image's `settings.json` when provided.
+  **Optional features (incl. language) are NOT baked** — they're applied at run time by `task` (see §6).
+- **GNU userland**: grep/sed/gawk/coreutils/findutils/diffutils/util-linux/flock/gzip/patch/procps are
+  installed so in-container scripts get GNU behavior (e.g. `grep --include`, `date +%s%N`), not Wolfi's
+  busybox fallbacks. Added as the LAST base layer so rebuilds reuse the cached toolchain above.
 - **Wiring**: `serena setup claude-code` (MCP), `rtk init -g --no-patch` (RTK.md only), and a
   git credential helper (`!gh auth git-credential`) so in-container `git push` uses `GH_TOKEN`.
 
-Final image ≈ **194 MB**.
+On-disk image ≈ **830 MB** (Claude Code alone ~234 MB).
 
 **Two-layer build**: a heavy `workstation-base` (`Dockerfile.base`, the toolchain) built once and
 reused, and a thin `workstation` (`Dockerfile`, `FROM workstation-base`) for config/hooks — so
