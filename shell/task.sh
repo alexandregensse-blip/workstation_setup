@@ -5,8 +5,7 @@
 #   task resume                                  reopen task clones in new tabs, CONTINUING the Claude session.
 #   task cleanup [-y]                            delete clones that are clean AND fully pushed (asks; -y skips).
 #   task settings                                show/edit features (notifications, language, memory, DNS, …).
-#   task auth [--slot <name>]                    (re)login to Claude; --slot creates an independent login.
-#   task slots                                   list credential slots (independent logins for parallel tasks).
+#   task auth [<name> | rm <name>]               manage Claude logins (independent, self-refreshing accounts).
 #   task help                                    this help (also shown for: task, task -h/--help/?).
 #
 # Container-only: the host has NO Claude/Serena/rtk — they live in the 'workstation' image.
@@ -52,11 +51,11 @@ task — isolated Claude sessions in disposable containers.
                                                line, memory persistence, DNS, and the Claude launch
                                                defaults. Stored in <ws>/.config (no host env), applied
                                                to the next task.
-  task auth [--slot <name>]                    (Re)login to Claude. With --slot <name>, log into an
-                                               INDEPENDENT credential slot (its own token) for running
-                                               many long tasks in parallel — each self-refreshes and
-                                               survives for days. Without slots, tasks share one login.
-  task slots                                   List credential slots and whether each is free or busy.
+  task auth                                    List Claude logins (account, free/busy, token expiry).
+  task auth <name>                             Browser-login into <name> — an INDEPENDENT, self-refreshing
+                                               login (its own token, can be its own Anthropic account).
+                                               A task auto-borrows a free login; run several for parallel
+                                               long tasks. 'task auth rm <name>' removes one.
   task help                                    This help.
 
 Features are configured with 'task settings' (stored in <ws>/.config, not host env). They apply to
@@ -222,50 +221,93 @@ _task_settings(){
 }
 
 # --- Claude credential SLOTS (independent, self-refreshing logins; one per concurrent task) ---
-# Each slot is an INDEPENDENT Claude login (its own refresh token) under <ws>/.claude-slots/<name>/,
-# used as a task container's CLAUDE_CONFIG_DIR — a writable DIRECTORY, so Claude refreshes its own
-# token in place (a single-file mount forbids the atomic rename Claude uses). Nothing is shared
-# between slots or with the host, so many concurrent multi-day tasks never clobber each other's token
-# (the failure mode of copying ONE login everywhere). A slot is "busy" while a task container labeled
-# workstation.slot=<name> runs. No slots configured → tasks fall back to the single host-synced login.
+# A LOGIN is one INDEPENDENT Claude session under <ws>/.claude-slots/<name>/ — its own refresh token,
+# possibly its own Anthropic account. A task uses it as the container's CLAUDE_CONFIG_DIR — a writable
+# DIRECTORY, so Claude refreshes its own token in place (a single-file mount forbids the atomic rename
+# Claude uses). Nothing is shared between logins or with the host, so concurrent multi-day tasks never
+# clobber each other's token, and different logins can be different accounts. A login is "busy" while
+# a task container labeled workstation.slot=<name> runs. 'task auth' manages them.
 
-# List authed slot names (one per line); a slot is "authed" once it has credentials.
+# List authed login names (one per line); a login is "authed" once it has credentials.
 _task_slot_list(){ local sdir s; sdir="$(_task_slots_dir)"; [ -d "$sdir" ] || return 0
   for s in "$sdir"/*/; do [ -f "${s}.credentials.json" ] && basename "$s"; done; }
 
-# Is slot $1 in use by a running task container right now?
+# Is login $1 in use by a running task container right now?
 _task_slot_busy(){ local dock; dock="$(_task_dock)"; [ -n "$($dock ps -q --filter "label=workstation.slot=$1" 2>/dev/null)" ]; }
 
-# Choose the slot for a clone → global _TASK_SLOT (empty = no slots = legacy mode). Sticky per clone
-# (recorded in .git/claude-slot so 'resume' reuses it), else the first free authed slot. Returns 1 if
-# slots exist but all are busy.
+# The Anthropic account (email) behind login $1, read from its .claude.json (no secret).
+_task_login_account(){ jq -r '.oauthAccount.emailAddress // empty' "$(_task_slots_dir)/$1/.claude.json" 2>/dev/null; }
+
+# Browser login into login $1 (its OWN independent token / account), written into the login dir via
+# CLAUDE_CONFIG_DIR. Returns 0 once .credentials.json exists. Used by 'task auth <name>' and the
+# all-busy auto-prompt below.
+_task_slot_login(){
+  local sn="$1" ws_dir dock sdir; ws_dir="$(_task_wsdir)"; dock="$(_task_dock)"; sdir="$ws_dir/.claude-slots/$sn"
+  mkdir -p "$sdir"
+  echo "Logging into Claude for login '$sn' (its OWN independent token) — open the printed URL:"
+  $dock run -it --rm -e CLAUDE_CONFIG_DIR=/cfg -v "$sdir:/cfg" workstation bash -lc 'claude auth login'
+  [ -f "$sdir/.credentials.json" ]
+}
+
+# Choose a login for a clone → global _TASK_SLOT (empty = no logins exist → caller uses a token or
+# errors). Sticky per clone (recorded in .git/claude-slot so 'resume' reuses it), else the first free
+# login. If all logins are busy and there's a TTY, offer to create one on the spot. Returns 1 if none.
 _task_slot_acquire(){
   local dir="$1" sdir rec cand="" s; sdir="$(_task_slots_dir)"; _TASK_SLOT=""
   local -a authed; mapfile -t authed < <(_task_slot_list)
-  [ "${#authed[@]}" -gt 0 ] || return 0                       # no slots → legacy mode
+  [ "${#authed[@]}" -gt 0 ] || return 0                       # no logins → token-or-error in caller
   rec="$(cat "$dir/.git/claude-slot" 2>/dev/null || true)"
   if [ -n "$rec" ] && [ -f "$sdir/$rec/.credentials.json" ] && ! _task_slot_busy "$rec"; then cand="$rec"
   else for s in "${authed[@]}"; do _task_slot_busy "$s" || { cand="$s"; break; }; done; fi
-  [ -n "$cand" ] || { echo "task: all ${#authed[@]} Claude slot(s) busy — exit a task to free one, or add: task auth --slot <name>." >&2; return 1; }
+  if [ -z "$cand" ]; then
+    # all busy — offer to add one now (needs a real, openable controlling TTY for the browser login)
+    if { true >/dev/tty; } 2>/dev/null; then
+      local ans; printf 'All %d Claude slot(s) are busy. Create a new slot now? [name / Enter=skip]: ' "${#authed[@]}" > /dev/tty
+      read -r ans < /dev/tty || ans=""
+      ans="$(printf '%s' "$ans" | tr -cd 'A-Za-z0-9_-')"     # sanitize to a safe slot name
+      if [ -n "$ans" ]; then _task_slot_login "$ans" && cand="$ans" || { echo "task: slot '$ans' login failed." >&2; return 1; }; fi
+    fi
+    [ -n "$cand" ] || { echo "task: all ${#authed[@]} Claude login(s) busy — exit a task to free one, or add: task auth <name>." >&2; return 1; }
+  fi
   printf '%s' "$cand" > "$dir/.git/claude-slot"; _TASK_SLOT="$cand"
 }
 
-# 'task slots' — list slots with free/busy + token expiry.
-_task_slots_cmd(){
-  local sdir s exp; sdir="$(_task_slots_dir)"
+# 'task auth' — the single hub for Claude credentials (logins). Each login is independent and
+# self-refreshing, and can be a different Anthropic account.
+#   task auth              list logins (account, free/busy, token expiry); offer to add one if none
+#   task auth <name>       browser login into <name> (create it, or re-login an expired one)
+#   task auth rm <name>    remove a login
+_task_auth(){
+  local sub="${1:-}" sdir s exp acct busy; sdir="$(_task_slots_dir)"
+  case "$sub" in
+    rm|remove|delete)
+      local n="${2:-}"; [ -n "$n" ] || { echo "usage: task auth rm <name>"; return 1; }
+      [ -d "$sdir/$n" ] || { echo "task: no login '$n'."; return 1; }
+      _task_slot_busy "$n" && { echo "task: login '$n' is in use by a running task — exit it first."; return 1; }
+      rm -rf "$sdir/$n"; echo "removed login '$n'."; return 0 ;;
+    '') : ;;                                              # fall through to list
+    -*) echo "usage: task auth [<name> | rm <name>]"; return 1 ;;
+    *)  _task_slot_login "$sub" && echo "login '$sub' ready ✓ — a task will pick it up automatically." \
+                                || echo "login '$sub' not logged in (re-run 'task auth $sub')."; return 0 ;;
+  esac
+  # list
   local -a authed; mapfile -t authed < <(_task_slot_list)
   if [ "${#authed[@]}" -eq 0 ]; then
-    echo "No Claude slots yet. For many parallel long-running tasks, create independent logins:"
-    echo "  task auth --slot <name>      (e.g. task auth --slot a, then --slot b, …)"
-    echo "Each self-refreshes and survives for days. Without slots, tasks share the host-synced login"
-    echo "(fine for one long task at a time)."
+    echo "No Claude logins yet. Create one (a browser login; each is independent and self-refreshing):"
+    echo "  task auth <name>        e.g. task auth default   (then 'task auth work', … for more accounts/parallel tasks)"
+    [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && echo "  (CLAUDE_CODE_OAUTH_TOKEN is set — headless tasks can run without a login.)"
+    { true >/dev/tty; } 2>/dev/null || return 0
+    printf 'Create one now? [name / Enter=skip]: '; local a; read -r a < /dev/tty || a=""
+    a="$(printf '%s' "$a" | tr -cd 'A-Za-z0-9_-')"; [ -n "$a" ] && _task_slot_login "$a" >/dev/null && echo "login '$a' ready ✓"
     return 0
   fi
-  echo "Claude slots — independent logins, each self-refreshing:"
+  echo "Claude logins (independent, self-refreshing):"
   for s in "${authed[@]}"; do
     exp="$(jq -r '(.claudeAiOauth.expiresAt/1000)|todate' "$sdir/$s/.credentials.json" 2>/dev/null || echo '?')"
-    printf '  %-16s %s   token exp: %s\n' "$s" "$(_task_slot_busy "$s" && echo '[busy]' || echo '[free]')" "$exp"
+    acct="$(_task_login_account "$s")"; busy="$(_task_slot_busy "$s" && echo '[busy]' || echo '[free]')"
+    printf '  %-14s %-6s %-32s token exp: %s\n' "$s" "$busy" "${acct:-?}" "$exp"
   done
+  echo "  (task auth <name> to add · task auth rm <name> to remove)"
 }
 
 # Known MCP/tool artifacts to keep out of `git status`. We add these to the clone-LOCAL
@@ -332,15 +374,15 @@ _task_run(){
   local proj="$dir/.git/claude-projects"; mkdir -p "$proj"
   local -a resume_env=(); [ -n "$resume" ] && resume_env=(-e WS_RESUME=1)
 
-  # Pick a credential slot (independent + self-refreshing) if any are configured; else legacy mode.
+  # Pick a login (independent, self-refreshing). None exist → fall back to a headless token, else error.
   _task_slot_acquire "$dir" || return 1
   local slot="$_TASK_SLOT"
 
   local -a claude_auth=() cfg_mounts=() session=() claude_cmd=()
   if [ -n "$slot" ]; then
-    # ---- SLOT MODE: CLAUDE_CONFIG_DIR = the slot dir (a writable DIRECTORY) → Claude refreshes its own
-    # independent token in place and persists it there for the next task (survives days). The clone's
-    # history is overlaid at /cfg/projects (resume stays per-clone); the label marks the slot busy.
+    # ---- LOGIN MODE: CLAUDE_CONFIG_DIR = the login dir (a writable DIRECTORY) → Claude refreshes its
+    # own independent token in place and persists it for the next task (survives days). The clone's
+    # history is overlaid at /cfg/projects (resume stays per-clone); the label marks the login busy.
     local slot_dir="$ws_dir/.claude-slots/$slot"
     cfg_mounts=(-v "$slot_dir:/cfg" -v "$proj:/cfg/projects" -e CLAUDE_CONFIG_DIR=/cfg --label "workstation.slot=$slot")
     [ -f "$ws_dir/.claude/settings.json" ]    && cfg_mounts+=(-v "$ws_dir/.claude/settings.json:/seed/settings.json:ro")
@@ -359,20 +401,11 @@ _task_run(){
       jq ".projects[\"/work\"] += {hasTrustDialogAccepted:true, hasCompletedProjectOnboarding:true}" "$cfg" > /tmp/c2 2>/dev/null && mv /tmp/c2 "$cfg"
       [ "${WS_RESUME:-0}" = 1 ] && compgen -G "$CFG/projects/*/*.jsonl" >/dev/null 2>&1 && set -- --continue "$@"
       exec claude "$@"' _ "${cflags[@]}")
-    echo "task: Claude slot '$slot' (independent login, self-refreshing)."
-  else
-    # ---- LEGACY MODE: single host-synced credential mounted read-only. It can't self-refresh (Claude
-    # rewrites .credentials.json by atomic rename, which a single-file bind mount forbids), so it's
-    # fine for one long task at a time but 401s past the token's ~hours lifetime — use slots for many
-    # concurrent long tasks. Re-synced from the host login when newer (host ~/.claude is only READ).
-    local creds="$ws_dir/.claude/.credentials.json"
-    local host_creds="$HOME/.claude/.credentials.json"
-    if [ -z "${WORKSTATION_CLAUDE_NOSYNC:-}" ] && [ -f "$host_creds" ] && [ "$host_creds" -nt "$creds" ]; then
-      mkdir -p "$ws_dir/.claude" && cp "$host_creds" "$creds" && chmod 600 "$creds"
-    fi
-    if [ -f "$creds" ]; then claude_auth=(-v "$creds:/home/dev/.claude/.credentials.json:ro")
-    elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then claude_auth=(-e CLAUDE_CODE_OAUTH_TOKEN)
-    else echo "task: no Claude credentials — run 'task auth' (or 'task auth --slot <name>', or set CLAUDE_CODE_OAUTH_TOKEN)."; return 1; fi
+    echo "task: Claude login '$slot'${slot:+ ($(_task_login_account "$slot" 2>/dev/null))}."
+  elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+    # ---- HEADLESS TOKEN MODE: no stored login, authenticate with CLAUDE_CODE_OAUTH_TOKEN (ephemeral,
+    # no refresh persistence). Config = baked image + read-only seeds; history mounted per-clone.
+    claude_auth=(-e CLAUDE_CODE_OAUTH_TOKEN)
     [ -f "$ws_dir/.claude/settings.json" ] && cfg_mounts+=(-v "$ws_dir/.claude/settings.json:/home/dev/.claude/settings.json:ro")
     [ -f "$ws_dir/.claude/statusline.sh" ]  && cfg_mounts+=(-v "$ws_dir/.claude/statusline.sh:/home/dev/.claude/statusline.sh:ro")
     [ -f "$ws_dir/gh/config.yml" ]          && cfg_mounts+=(-v "$ws_dir/gh/config.yml:/home/dev/.config/gh/config.yml:ro")
@@ -384,6 +417,9 @@ _task_run(){
       jq ".projects[\"/work\"] += {hasTrustDialogAccepted:true, hasCompletedProjectOnboarding:true}" "$cfg" > /tmp/c2 2>/dev/null && mv /tmp/c2 "$cfg"
       [ "${WS_RESUME:-0}" = 1 ] && compgen -G "$HOME/.claude/projects/*/*.jsonl" >/dev/null 2>&1 && set -- --continue "$@"
       exec claude "$@"' _ "${cflags[@]}")
+  else
+    echo "task: no Claude login — create one with 'task auth <name>' (or set CLAUDE_CODE_OAUTH_TOKEN for headless)." >&2
+    return 1
   fi
 
   # git identity for in-container commits (attribution only — no secret), from host git
@@ -420,40 +456,8 @@ task() {
     resume)   _task_resume; return $? ;;
     cleanup)  shift; _task_cleanup "$@"; return $? ;;
     settings) _task_settings; return $? ;;
-    slots)    _task_slots_cmd; return $? ;;
     open)    [ -n "${2:-}" ] || { echo "usage: task open <clone-dir>"; return 1; }; _task_run "$2" "$(basename "$2")" resume; return $? ;;
-    auth)
-      local ws_dir dock; ws_dir="$(_task_wsdir)"; dock="$(_task_dock)"
-      # 'task auth --slot <name>' — log into an INDEPENDENT slot (its own refresh token), written
-      # straight into the slot dir via CLAUDE_CONFIG_DIR. Used for many concurrent long-running tasks.
-      if [ "${2:-}" = "--slot" ]; then
-        local sn="${3:-}"; [ -n "$sn" ] || { echo "usage: task auth --slot <name>"; return 1; }
-        local sdir="$ws_dir/.claude-slots/$sn"; mkdir -p "$sdir"
-        echo "Logging into Claude for slot '$sn' (its OWN independent token) — open the printed URL:"
-        $dock run -it --rm -e CLAUDE_CONFIG_DIR=/cfg -v "$sdir:/cfg" workstation bash -lc 'claude auth login'
-        [ -f "$sdir/.credentials.json" ] && echo "slot '$sn' ready ✓ — a task will pick it up automatically." \
-                                         || echo "slot '$sn' not logged in (re-run 'task auth --slot $sn')."
-        return 0
-      fi
-      mkdir -p "$ws_dir/.claude"
-      # Offer to (re)use the host login when it exists AND our copy is missing or older than it
-      # (a stale snapshot — the cause of "Please run /login" in tasks). _task_run also re-syncs
-      # automatically on every task start; this is the explicit, interactive path.
-      if [ -f "$HOME/.claude/.credentials.json" ] && \
-         { [ ! -f "$ws_dir/.claude/.credentials.json" ] || [ "$HOME/.claude/.credentials.json" -nt "$ws_dir/.claude/.credentials.json" ]; }; then
-        local acct a
-        acct="$(grep -oE '"emailAddress"[[:space:]]*:[[:space:]]*"[^"]+"' "$HOME/.claude.json" 2>/dev/null | head -1 | sed -E 's/.*"([^"]+)"$/\1/')"
-        [ -z "$acct" ] && acct="unknown account"
-        printf 'Reuse the Claude login already on this machine (account: %s)? [Y/n]: ' "$acct"
-        read -r a || a=y
-        case "$a" in n|N|no|NO) ;; *)
-          cp "$HOME/.claude/.credentials.json" "$ws_dir/.claude/.credentials.json"; chmod 600 "$ws_dir/.claude/.credentials.json"
-          echo "reused host credentials for $acct ✓"; return 0 ;;
-        esac
-      fi
-      $dock run -it --rm -v "$ws_dir/.claude:/seed" workstation \
-        bash -lc 'claude auth login && cp -f "$HOME/.claude/.credentials.json" /seed/.credentials.json'
-      return $? ;;
+    auth)    shift; _task_auth "$@"; return $? ;;
   esac
 
   # ---- start a new task ----

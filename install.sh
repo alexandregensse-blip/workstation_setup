@@ -210,22 +210,13 @@ if gh auth status >/dev/null 2>&1; then echo "  → GitHub: already authenticate
 elif [ -r /dev/tty ]; then echo "  GitHub login (a browser/code flow follows):"; gh auth login --web --git-protocol https < /dev/tty || true
 else echo "  → GitHub: no TTY — run 'gh auth login' later"; fi
 
-# Claude credentials: reuse decision now (cp needs no image); browser login (no-reuse) is deferred to after the build
-mkdir -p "$WS_DIR/.claude"
+# Claude login: a 'default' login (independent + self-refreshing, like 'task auth default'). The
+# browser login is deferred to after the build (needs the image). We DON'T copy the host login — an
+# independent browser login is what self-refreshes and supports multiple accounts later.
 NEED_LOGIN=0; CLAUDE_NOTE=""
-if [ -f "$WS_DIR/.claude/.credentials.json" ]; then CLAUDE_NOTE="already present"
-elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then CLAUDE_NOTE="using CLAUDE_CODE_OAUTH_TOKEN"
-elif [ -f "$HOME/.claude/.credentials.json" ]; then
-  acct="$(grep -oE '"emailAddress"[[:space:]]*:[[:space:]]*"[^"]+"' "$HOME/.claude.json" 2>/dev/null | head -1 | sed -E 's/.*"([^"]+)"$/\1/')"
-  [ -z "$acct" ] && acct="unknown account"
-  if [ "$ASSUME_YES" = 1 ]; then ans=y
-  elif [ -r /dev/tty ]; then printf '  Reuse the Claude login on this machine (account: %s)? [Y/n]: ' "$acct"; read -r ans < /dev/tty || ans=y
-  else ans=y; fi
-  case "${ans:-y}" in
-    n|N|no|NO) NEED_LOGIN=1; CLAUDE_NOTE="will log in after the build" ;;
-    *) cp "$HOME/.claude/.credentials.json" "$WS_DIR/.claude/.credentials.json"; chmod 600 "$WS_DIR/.claude/.credentials.json"; CLAUDE_NOTE="reused host login ($acct)" ;;
-  esac
-else NEED_LOGIN=1; CLAUDE_NOTE="will log in after the build"; fi
+if [ -f "$WS_DIR/.claude-slots/default/.credentials.json" ]; then CLAUDE_NOTE="login 'default' already present"
+elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then CLAUDE_NOTE="using CLAUDE_CODE_OAUTH_TOKEN (headless)"
+else NEED_LOGIN=1; CLAUDE_NOTE="will log in after the build (login 'default')"; fi
 echo "  → Claude: $CLAUDE_NOTE"
 
 # Optional FEATURES → <ws>/.config (a key=value file, NOT host env vars). Editable later via
@@ -278,6 +269,7 @@ else ck_set 1 done "up to date"; fi
 # 2. import preferences (apply the earlier decision; needs the image's jq)
 ck_set 2 doing
 if [ "$IMPORT_PREFS" = 1 ] && [ -f "$HOME/.claude/settings.json" ]; then
+  mkdir -p "$WS_DIR/.claude"
   cp "$HOME/.claude/settings.json" "$WS_DIR/.claude/host-settings.json"
   [ -f "$HOME/.claude/statusline.sh" ] && cp "$HOME/.claude/statusline.sh" "$WS_DIR/.claude/statusline.sh"
   if dock run --rm -v "$WS_DIR:/ws" workstation bash -lc \
@@ -309,15 +301,17 @@ if ! grep -q '# >>> workstation >>>' "$HOME/.bashrc" 2>/dev/null; then
   ck_set 3 done "added to ~/.bashrc"
 else ck_set 3 done "already in ~/.bashrc"; fi
 
-# 4. Claude login (reused already, or the deferred browser login — the only post-build prompt)
+# 4. Claude login — browser login into the 'default' login dir (its OWN independent token), the only
+#    post-build prompt. CLAUDE_CONFIG_DIR makes Claude write straight into the login dir.
 ck_set 4 doing
 if [ "$NEED_LOGIN" = 1 ] && [ -r /dev/tty ]; then
   ck_dirty
+  mkdir -p "$WS_DIR/.claude-slots/default"
   echo "  Logging into Claude inside a container — open the printed URL to authorize:"
-  dock run -it --rm -v "$WS_DIR/.claude:/seed" workstation \
-    bash -lc 'claude auth login && cp -f "$HOME/.claude/.credentials.json" /seed/.credentials.json' < /dev/tty || true
-  [ -f "$WS_DIR/.claude/.credentials.json" ] && ck_set 4 done "logged in" || ck_set 4 done "not logged in — run 'task auth'"
-elif [ "$NEED_LOGIN" = 1 ]; then ck_set 4 done "no TTY — run 'task auth' later"
+  dock run -it --rm -e CLAUDE_CONFIG_DIR=/cfg -v "$WS_DIR/.claude-slots/default:/cfg" workstation \
+    bash -lc 'claude auth login' < /dev/tty || true
+  [ -f "$WS_DIR/.claude-slots/default/.credentials.json" ] && ck_set 4 done "logged in (default)" || ck_set 4 done "not logged in — run 'task auth default'"
+elif [ "$NEED_LOGIN" = 1 ]; then ck_set 4 done "no TTY — run 'task auth default' later"
 else ck_set 4 done "$CLAUDE_NOTE"; fi
 
 # ===== final check + banner =====
@@ -339,7 +333,8 @@ task commands (isolated Claude session in a container):
   task [repo] [topic]                  → clones into $WS_RUNNING (repo prompted if omitted; topic → timestamp)
   task --here [repo] [topic]           → base = current directory
   task --at <path> [repo] [topic]      → base = given path
-  task auth                            → (re)login to Claude (stored in .workstation/.claude)
+  task auth [<name>]                   → manage Claude logins (independent, self-refreshing)
+  task settings                        → notifications, language, memory, DNS, launch defaults
   e.g.  task claude-autodev fix-login
 EOF
 [ "${group_added:-0}" = 1 ] && printf '\nDocker: works now via sudo. Log out/in once to use it without sudo (group '\''docker'\'').\n'

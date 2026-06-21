@@ -67,8 +67,9 @@ task --at /path <repo> [topic]   # base = given path
 task resume                      # reopen task clones (pick some in a checkbox menu), each in a new tab, CONTINUING its Claude session
 task cleanup [-y]                # delete clones that are clean AND fully pushed (asks; -y skips the prompt)
 task settings                    # show/edit features (notifications, language, theme, DNS, launch defaults)
-task auth [--slot <name>]        # (re)login to Claude; --slot makes an independent login (see Auth)
-task slots                       # list credential slots (independent logins for parallel long tasks)
+task auth                        # list Claude logins (account, free/busy, token expiry)
+task auth <name>                 # browser-login into <name> — an independent, self-refreshing login
+task auth rm <name>              # remove a login
 task help                        # full help (also shown for: task with no args)
 ```
 
@@ -160,10 +161,10 @@ task settings       # set  memory = repo (default) | global | off
 
 **Run several long (hours/days) tasks in parallel** — one independent login per concurrent task:
 ```bash
-task auth --slot a            # browser login, once per slot
-task auth --slot b
-task slots                    # see which are free / busy
-task autodev big-refactor     # auto-borrows a free slot
+task auth work                # browser login, once per login (can be a different account)
+task auth perso
+task auth                     # see logins: account, free / busy, token expiry
+task autodev big-refactor     # auto-borrows a free login
 task site i18n-migration      # borrows another
 ```
 
@@ -184,36 +185,28 @@ task settings                              # show all features + edit
 
 - **GitHub** — host `gh` login (`gh auth token` passed to the container; a baked credential helper
   lets in-container `git push` use it).
-- **Claude** — if you're **already logged into Claude on this machine**, install (and `task auth`)
-  detect it, show the account, and offer to **reuse the existing token** (host `~/.claude` is only
-  read, never modified). Otherwise `task auth` logs in **inside a container** (it prints a URL to
-  open — the browser can't auto-open from a container). Either way the credentials are stored in
-  `<workspace>/.workstation/.claude/.credentials.json` and mounted read-only into task containers.
-  Headless: set `CLAUDE_CODE_OAUTH_TOKEN` instead.
-- **Kept fresh automatically** — that stored copy is a snapshot, while your host login keeps
-  refreshing its OAuth token; a stale copy makes tasks fail with **`Please run /login` / `401`**.
-  So every `task` start **re-syncs the credentials from your host login when it's newer** (the host
-  `~/.claude` is only *read*). Set `WORKSTATION_CLAUDE_NOSYNC=1` to opt out. A container can't
-  self-heal this single shared login — Claude rewrites the file by atomic rename, which a single-file
-  mount disallows — so it's fine for **one long task at a time** but a multi-hour task can hit `401`
-  past the token's lifetime. For many **parallel** long tasks, use slots ↓.
-
-### Credential slots (parallel, multi-day tasks)
-
-A **slot** is an **independent** Claude login (its own refresh token, same account is fine — like
-signing into Claude Code on another machine). Create as many as you'll run at once:
+- **Claude — logins.** Credentials are managed entirely through **`task auth`**. A *login* is an
+  **independent, self-refreshing** Claude session stored in `<workspace>/.workstation/.claude-slots/<name>/`
+  — its own OAuth token, and it can be its **own Anthropic account**. Install creates a `default`
+  login; add more for parallel tasks / extra accounts.
 
 ```bash
-task auth --slot a      # logs in inside a container (prints a URL), once per slot
-task auth --slot b
-task slots              # list slots + free/busy + token expiry
+task auth                 # list logins: name, account, free/busy, token expiry
+task auth default         # browser-login into 'default' (prints a URL — the browser can't auto-open
+                          # from a container; authorizing redirects and captures the code for you)
+task auth work            # another independent login (a different account is fine)
+task auth rm work         # remove one
 ```
 
-A task automatically **borrows a free slot** (sticky per clone, so `resume` reuses the same one). Its
-credentials are mounted as a **writable directory** (`CLAUDE_CONFIG_DIR`), so Claude **refreshes its
-own token in place** and the session **survives for days**. Nothing is shared between slots or with
-the host, so concurrent tasks never clobber each other's token (the failure mode of copying one login
-everywhere). With **no slots configured**, tasks use the single host-synced login above (unchanged).
+- **Self-refreshing — no more `Please run /login` / `401`.** Each login is mounted into the task as a
+  **writable directory** (`CLAUDE_CONFIG_DIR`), so Claude **refreshes its own token in place** and a
+  session **survives for days**. (The old single read-only credential couldn't do that — a single-file
+  mount forbids the atomic rename Claude uses — which is why long tasks used to drop.)
+- **A task auto-borrows a free login** (sticky per clone, so `resume` reuses the same one). Run
+  several logins to drive **parallel** long tasks; if all are busy when you start one, `task` offers
+  to create another on the spot. Nothing is shared between logins or with the host `~/.claude`, so
+  concurrent refreshes never collide and different logins stay on different accounts.
+- **Headless**: set `CLAUDE_CODE_OAUTH_TOKEN` and tasks run with no stored login (ephemeral, no refresh).
 
 ## Preferences
 

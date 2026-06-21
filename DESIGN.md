@@ -99,10 +99,10 @@ Missing flag values fail fast with a clear message (guarded against `set -u`).
    exported here — install seeds them into `<ws>/.config` (first install only; notifications default
    ON, plus language/launch defaults), later edited by `task settings`, so the host env stays clean.
 8. **GitHub auth** — `gh auth login --web` only if not already authenticated (skipped with no TTY).
-9. **Claude credentials** — logs in **inside a container** and copies the resulting
-   `.credentials.json` to `<workspace>/.workstation/.claude/` (host `~/.claude` stays untouched).
-   No-op if a stored file exists or `CLAUDE_CODE_OAUTH_TOKEN` is set; deferred to `task auth` if
-   there's no TTY.
+9. **Claude login** — browser-logs in **inside a container** into the `default` login
+   (`<ws>/.claude-slots/default/`, via `CLAUDE_CONFIG_DIR`; host `~/.claude` is never touched). No-op
+   if `default` already exists or `CLAUDE_CODE_OAUTH_TOKEN` is set; deferred to `task auth default` if
+   there's no TTY. See §8.
 10. **Confirmation banner** — verifies docker/git/gh + the image, prints locations and `task` usage.
 
 **Idempotency**: re-running installs/configures only what is missing. The committed
@@ -115,19 +115,18 @@ task [--here | --at <path>] [repo] [topic]   # start a task (runs in the current
 task resume                                   # reopen clones (checkbox menu), each in a new tab, CONTINUE its Claude session
 task cleanup [-y]                             # delete clones that are clean AND fully pushed
 task settings                                 # show/edit features (notifications, language, theme, DNS, launch defaults)
-task auth [--slot <name>]                     # (re)login to Claude; --slot = independent login (see §8)
-task slots                                    # list credential slots (independent logins for parallel tasks)
+task auth [<name> | rm <name>]                # manage Claude logins (independent, self-refreshing; see §8)
 ```
 
-1. **`task auth`** — runs `claude auth login` in a throwaway container and persists the
-   credentials to `<workspace>/.workstation/.claude/.credentials.json`.
+1. **`task auth`** — manages Claude *logins* (see §8): no arg lists them, `<name>` browser-logs into
+   a login, `rm <name>` removes one. Each login is an independent, self-refreshing credential.
 2. **Base selection** — `--here` (`$PWD`) > `--at <path>` > `$WORKSTATION_RUNNING` >
    `${WORKSTATION_HOME:-$HOME/dev}/running`. **Repo**: if omitted, pick from your `gh` repos or
    type `owner/name`/URL. **Topic**: if omitted, a timestamp is used as the task name.
 3. **Auth checked up front** (no silent failure):
    - GitHub: requires `gh auth token` (else clear error).
-   - Claude: mounts `<workstation>/.claude/.credentials.json` **if it exists**, else uses
-     `$CLAUDE_CODE_OAUTH_TOKEN`, else a clear error pointing to `task auth`.
+   - Claude: auto-borrows a free **login** (§8); else `$CLAUDE_CODE_OAUTH_TOKEN` (headless); else a
+     clear error pointing to `task auth <name>`.
 4. **Clone on the host** → `<base>/<repo>/<YYYYMMDD-HHMMSS>_<slug>` (just the timestamp if no
    topic) — WIP survives the container. Known **MCP artifacts** (Serena's `.serena/` — cache,
    memories, project config) are added to the clone-LOCAL `.git/info/exclude` (never the repo's
@@ -194,33 +193,23 @@ network with flaky DNS, the `dns` feature (`task settings`) makes `task` pass th
 
 - **GitHub** — host: gh keyring (or `GH_TOKEN`). Container: `GH_TOKEN="$(gh auth token)"`
   passed by `task`; the baked credential helper lets `git push` use it.
-- **Claude** — credentials live in `<workspace>/.workstation/.claude/.credentials.json`, mounted
-  read-only into task containers. They are obtained by, in order: (1) **reusing an existing host
-  login** if `~/.claude/.credentials.json` is present — install/`task auth` show the account
-  (`emailAddress` read from `~/.claude.json`) and ask before copying it (the host file is only
-  read, never modified); (2) else a login **inside a container** (`task auth`), which prints a URL
-  to open — the browser can't auto-open from inside a container; (3) else `CLAUDE_CODE_OAUTH_TOKEN`
-  (generate once with `claude setup-token`). The host `~/.claude` is never written.
-- **Token freshness.** The stored copy is a snapshot; the host login keeps refreshing its OAuth
-  access token, so the copy goes stale and tasks fail with `Please run /login` / `401`. A task
-  container **cannot self-heal this single shared login**: Claude rewrites `.credentials.json` by
-  atomic rename, which a single-file bind mount rejects (`Device or resource busy`). So `_task_run`
-  **re-syncs the copy from the host login whenever the host file is newer** (still read-only on the
-  host — we copy *from* it), and `task auth` offers the same when its copy is missing or older. Opt
-  out with `WORKSTATION_CLAUDE_NOSYNC=1`. Good for **one long task at a time**; past the token's
-  ~hours lifetime a single shared login `401`s. For parallel long tasks → slots.
-- **Credential slots** (`<ws>/.claude-slots/<name>/`). A slot is an **independent** login (its own
-  refresh token — multiple are fine on one account, like several machines), created by
-  `task auth --slot <name>` (an in-container `claude auth login` writing straight into the slot dir
-  via `CLAUDE_CONFIG_DIR`). `_task_run` borrows a **free** slot (sticky per clone, recorded in
-  `.git/claude-slot`, so resume reuses it; a slot is *busy* while a container labeled
-  `workstation.slot=<name>` runs) and mounts it as the container's `CLAUDE_CONFIG_DIR` — a **writable
-  directory**, so rename works and Claude **refreshes its own token in place**, persisting it for the
-  next task → multi-day sessions survive. The clone's history is overlaid at `/cfg/projects`; baked
-  config is seeded into the slot dir each start. Nothing is shared between slots or with the host, so
-  concurrent refreshes never collide (the hazard of one copied login + refresh-token rotation). No
-  slots configured ⇒ the host-synced single login above (fully backward compatible). `task slots`
-  lists them with free/busy + expiry.
+- **Claude — logins** (`<ws>/.claude-slots/<name>/`). All Claude credentials are **logins** managed by
+  `task auth`: a login is an **independent** Claude session — its own OAuth refresh token, possibly its
+  **own Anthropic account**. Created by `task auth <name>` (an in-container `claude auth login` writing
+  straight into the login dir via `CLAUDE_CONFIG_DIR`); install creates `default`. The host `~/.claude`
+  is never read or copied (a copied token would share refresh-token rotation with the host and could
+  log it out — and couldn't be a separate account).
+- **Self-refreshing.** `_task_run` borrows a **free** login (sticky per clone, recorded in
+  `.git/claude-slot`, so resume reuses it; a login is *busy* while a container labeled
+  `workstation.slot=<name>` runs; all busy + TTY ⇒ offer to create one) and mounts it as the container's
+  `CLAUDE_CONFIG_DIR` — a **writable directory**, so the atomic rename Claude uses works and it
+  **refreshes its own token in place**, persisting it for the next task → **multi-day sessions survive,
+  no `401`** (the old single read-only `.credentials.json` couldn't, hence the disconnections). The
+  clone's history is overlaid at `/cfg/projects`; baked config is seeded into the login dir each start.
+  Nothing is shared between logins or with the host, so concurrent refreshes never collide and logins
+  stay on independent accounts. `task auth` lists them (account, free/busy, expiry); `task auth rm`.
+- **Headless** — `CLAUDE_CODE_OAUTH_TOKEN` (generate once with `claude setup-token`): a task with no
+  stored login runs with the env token (ephemeral, no refresh persistence).
 - **Browser login can't be fully automated** (the "Authorize" click is the security boundary);
   the CLI prints a URL/code and zero-interaction is only possible with a pre-provisioned token.
 - **Docker group**: `usermod -aG docker` only takes effect on next login. Because `sg`/`newgrp`
