@@ -4,6 +4,7 @@
 #                                                (asks if ambiguous/none); topic → timestamp if omitted.
 #   task resume                                  reopen task clones in new tabs, CONTINUING the Claude session.
 #   task cleanup [-y]                            delete clones that are clean AND fully pushed (asks; -y skips).
+#   task settings                                show/edit features (notifications, language, memory, DNS, …).
 #   task auth [--slot <name>]                    (re)login to Claude; --slot creates an independent login.
 #   task slots                                   list credential slots (independent logins for parallel tasks).
 #   task help                                    this help (also shown for: task, task -h/--help/?).
@@ -47,7 +48,10 @@ task — isolated Claude sessions in disposable containers.
   task cleanup [-y]                            Delete task clones that are clean AND fully pushed.
                                                Asks per clone; -y / --yes deletes without asking.
                                                Clones with uncommitted or unpushed work are kept.
-  task settings                                Show your install choices; edit the Claude launch defaults.
+  task settings                                Show/edit features: notifications, language, theme, status
+                                               line, memory persistence, DNS, and the Claude launch
+                                               defaults. Stored in <ws>/.config (no host env), applied
+                                               to the next task.
   task auth [--slot <name>]                    (Re)login to Claude. With --slot <name>, log into an
                                                INDEPENDENT credential slot (its own token) for running
                                                many long tasks in parallel — each self-refreshes and
@@ -55,12 +59,11 @@ task — isolated Claude sessions in disposable containers.
   task slots                                   List credential slots and whether each is free or busy.
   task help                                    This help.
 
-Launch flags — set these in your shell (or ~/.bashrc) and EVERY task starts that way:
-  WORKSTATION_CLAUDE_MODE=auto     permission mode: auto | acceptEdits | bypassPermissions | default
-  WORKSTATION_CLAUDE_MODEL=opus    model: an alias (opus/sonnet/…) or a full id
-  WORKSTATION_CLAUDE_EFFORT=high   effort: low | medium | high | xhigh | max
-  WORKSTATION_DNS="1.1.1.1 8.8.8.8" use reliable DNS in the container (if the network's DNS is flaky)
-(The container is the sandbox, so 'auto'/'bypassPermissions' is reasonable there.)
+Features are configured with 'task settings' (stored in <ws>/.config, not host env). They apply to
+the next task with no rebuild: notifications (terminal bell), language, theme, status line, per-repo
+memory persistence, reliable DNS, and Claude launch defaults (permission-mode / model / effort — the
+container is the sandbox, so 'auto' is reasonable). Each also takes a one-off env override
+(WORKSTATION_NOTIFY, WORKSTATION_CLAUDE_MODE, …) that is never written to your shell.
 
 (Note: 'man task' won't work — task is a shell function, not a man page. Use 'task help'.)
 EOF

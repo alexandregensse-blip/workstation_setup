@@ -37,6 +37,13 @@ WS_DIR="${WS_DIR:-$WS_HOME/.workstation}"
 
 log(){  printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
 dock(){ if docker info >/dev/null 2>&1; then docker "$@"; else sudo docker "$@"; fi; }
+# Quiet build: capture docker's step-by-step output + the legacy-builder deprecation warning into a
+# log and only surface it if the build FAILS. (We do NOT force DOCKER_BUILDKIT — buildx may be absent,
+# which would error; the legacy builder is fine, just noisy, so we hide its output on success.)
+qbuild(){ local log rc=0; log="$(mktemp)"
+  dock build "$@" >"$log" 2>&1 || rc=$?
+  [ "$rc" != 0 ] && { echo "  ✗ build failed — last lines:"; tail -30 "$log"; }
+  rm -f "$log"; return "$rc"; }
 [ -d "$WS_DIR/.git" ] || { echo "update: no workstation clone at $WS_DIR (pass --dir)"; exit 1; }
 
 # Pull quietly — git's enumerate/unpack/diffstat noise isn't useful here; we summarize instead.
@@ -70,11 +77,11 @@ else
   if [ "$needs_base" = 1 ]; then
     [ "$FRESH" = 1 ] && echo "Rebuilding base image — FRESH, latest Claude/Serena/rtk (a few minutes)…" \
                      || echo "Rebuilding base image (a few minutes)…"
-    if [ "$FRESH" = 1 ]; then dock build --pull --no-cache -f "$WS_DIR/Dockerfile.base" -t workstation-base "$WS_DIR"
-    else                      dock build -f "$WS_DIR/Dockerfile.base" -t workstation-base "$WS_DIR"; fi
+    if [ "$FRESH" = 1 ]; then qbuild --pull --no-cache -f "$WS_DIR/Dockerfile.base" -t workstation-base "$WS_DIR" || exit 1
+    else                      qbuild -f "$WS_DIR/Dockerfile.base" -t workstation-base "$WS_DIR" || exit 1; fi
   fi
   echo "Rebuilding workstation image (config)…"
-  dock build -t workstation "$WS_DIR"
+  qbuild -t workstation "$WS_DIR" || exit 1
 fi
 
 echo "✓ Up to date."
