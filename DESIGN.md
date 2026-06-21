@@ -201,7 +201,11 @@ network with flaky DNS, the `dns` feature (`task settings`) makes `task` pass th
   log it out — and couldn't be a separate account).
 - **Self-refreshing.** `_task_run` borrows a **free** login (sticky per clone, recorded in
   `.git/claude-slot`, so resume reuses it; a login is *busy* while a container labeled
-  `workstation.slot=<name>` runs; all busy + TTY ⇒ offer to create one) and mounts it as the container's
+  `workstation.slot=<name>` runs; all busy + TTY ⇒ offer to create one). Concurrent launches (resume
+  opening many tabs at once) each get a **different** login via a lock-free reservation: a `.reservations/<name>`
+  marker claimed by hard-linking a fully-written temp file (`ln` fails if it exists → atomic, pure
+  bash — no `flock`), epoch-stamped and honored for 60 s (bridging the gap until the container's busy
+  label appears). It mounts the login as the container's
   `CLAUDE_CONFIG_DIR` — a **writable directory**, so the atomic rename Claude uses works and it
   **refreshes its own token in place**, persisting it for the next task → **multi-day sessions survive,
   no `401`** (the old single read-only `.credentials.json` couldn't, hence the disconnections). The

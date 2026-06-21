@@ -235,6 +235,40 @@ _task_slot_list(){ local sdir s; sdir="$(_task_slots_dir)"; [ -d "$sdir" ] || re
 # Is login $1 in use by a running task container right now?
 _task_slot_busy(){ local dock; dock="$(_task_dock)"; [ -n "$($dock ps -q --filter "label=workstation.slot=$1" 2>/dev/null)" ]; }
 
+# A reservation bridges the gap between picking a login and its container getting the busy label —
+# without it, simultaneous launches (e.g. 'resume' opening N tabs at once) would all grab the same
+# "free" login and clobber one token. It's a FILE ($login/.reserved) holding an epoch stamp, claimed
+# atomically by hard-linking a fully-written temp file onto it (`ln` fails if the target exists → our
+# mutex, no flock). Because the content is written BEFORE the link, the file always has a valid stamp
+# the instant it appears. Honored only while fresh (<60s) — by then the container is labeled (busy
+# wins) or the launch died and the stale marker is cleared.
+# Reservation markers live in a sibling dir (NOT inside the login dir, which is mounted as the
+# container's /cfg) so they never leak into the container.
+_task_resv_file(){ printf '%s' "$(_task_slots_dir)/.reservations/$1"; }
+_task_slot_reserved_fresh(){
+  local r at now; r="$(_task_resv_file "$1")"; [ -f "$r" ] || return 1
+  at="$(<"$r")"; printf -v now '%(%s)T' -1
+  case "$at" in (*[!0-9]*|'') return 0 ;; esac               # exists but unreadable → just-claimed, treat as held
+  [ $(( now - at )) -lt 60 ]; }
+
+# A login is AVAILABLE if it has creds, no running task uses it, and it isn't freshly reserved.
+_task_slot_avail(){ local sdir; sdir="$(_task_slots_dir)"
+  [ -f "$sdir/$1/.credentials.json" ] || return 1
+  _task_slot_busy "$1" && return 1
+  _task_slot_reserved_fresh "$1" && return 1
+  return 0; }
+
+# Atomically claim login $1: write the epoch to a private temp, then `ln` it onto the reservation
+# (atomic; fails if held). Returns 0 on win. Lost to a FRESH reservation → 1; a STALE one is cleared.
+_task_slot_reserve(){
+  local r tmp rc; r="$(_task_resv_file "$1")"; tmp="$r.$BASHPID"
+  mkdir -p "$(_task_slots_dir)/.reservations"
+  printf '%(%s)T' -1 > "$tmp" 2>/dev/null || return 1
+  if ln "$tmp" "$r" 2>/dev/null; then rm -f "$tmp"; return 0; fi
+  if _task_slot_reserved_fresh "$1"; then rm -f "$tmp"; return 1; fi   # held & fresh → lost
+  rm -f "$r" 2>/dev/null                                               # stale → clear and retry
+  ln "$tmp" "$r" 2>/dev/null; rc=$?; rm -f "$tmp"; return "$rc"; }
+
 # The Anthropic account (email) behind login $1, read from its .claude.json (no secret).
 _task_login_account(){ jq -r '.oauthAccount.emailAddress // empty' "$(_task_slots_dir)/$1/.claude.json" 2>/dev/null; }
 
@@ -250,26 +284,33 @@ _task_slot_login(){
 }
 
 # Choose a login for a clone → global _TASK_SLOT (empty = no logins exist → caller uses a token or
-# errors). Sticky per clone (recorded in .git/claude-slot so 'resume' reuses it), else the first free
-# login. If all logins are busy and there's a TTY, offer to create one on the spot. Returns 1 if none.
+# errors). Tries the clone's sticky login first (so 'resume' reuses it), then the rest, CLAIMING one
+# atomically via _task_slot_reserve. The mkdir-based claim means N simultaneous launches (resume
+# opening many tabs) each win a DIFFERENT login — no lock daemon, pure bash. All busy + TTY → offer to
+# create one on the spot. Returns 1 if none can be had.
 _task_slot_acquire(){
-  local dir="$1" sdir rec cand="" s; sdir="$(_task_slots_dir)"; _TASK_SLOT=""
+  local dir="$1" sdir rec s; sdir="$(_task_slots_dir)"; _TASK_SLOT=""
   local -a authed; mapfile -t authed < <(_task_slot_list)
   [ "${#authed[@]}" -gt 0 ] || return 0                       # no logins → token-or-error in caller
   rec="$(cat "$dir/.git/claude-slot" 2>/dev/null || true)"
-  if [ -n "$rec" ] && [ -f "$sdir/$rec/.credentials.json" ] && ! _task_slot_busy "$rec"; then cand="$rec"
-  else for s in "${authed[@]}"; do _task_slot_busy "$s" || { cand="$s"; break; }; done; fi
-  if [ -z "$cand" ]; then
-    # all busy — offer to add one now (needs a real, openable controlling TTY for the browser login)
-    if { true >/dev/tty; } 2>/dev/null; then
-      local ans; printf 'All %d Claude slot(s) are busy. Create a new slot now? [name / Enter=skip]: ' "${#authed[@]}" > /dev/tty
-      read -r ans < /dev/tty || ans=""
-      ans="$(printf '%s' "$ans" | tr -cd 'A-Za-z0-9_-')"     # sanitize to a safe slot name
-      if [ -n "$ans" ]; then _task_slot_login "$ans" && cand="$ans" || { echo "task: slot '$ans' login failed." >&2; return 1; }; fi
+  for s in ${rec:+"$rec"} "${authed[@]}"; do                  # sticky first, then any other
+    _task_slot_avail "$s" || continue
+    if _task_slot_reserve "$s"; then                          # atomic win
+      printf '%s' "$s" > "$dir/.git/claude-slot"; _TASK_SLOT="$s"; return 0
     fi
-    [ -n "$cand" ] || { echo "task: all ${#authed[@]} Claude login(s) busy — exit a task to free one, or add: task auth <name>." >&2; return 1; }
+  done
+  # all busy — offer to add one now (needs a real, openable controlling TTY for the browser login)
+  if { true >/dev/tty; } 2>/dev/null; then
+    local ans; printf 'All %d Claude login(s) are busy. Create a new login now? [name / Enter=skip]: ' "${#authed[@]}" > /dev/tty
+    read -r ans < /dev/tty || ans=""
+    ans="$(printf '%s' "$ans" | tr -cd 'A-Za-z0-9_-')"       # sanitize to a safe login name
+    if [ -n "$ans" ]; then
+      if _task_slot_login "$ans"; then
+        _task_slot_reserve "$ans"; printf '%s' "$ans" > "$dir/.git/claude-slot"; _TASK_SLOT="$ans"; return 0
+      else echo "task: login '$ans' failed." >&2; return 1; fi
+    fi
   fi
-  printf '%s' "$cand" > "$dir/.git/claude-slot"; _TASK_SLOT="$cand"
+  echo "task: all ${#authed[@]} Claude login(s) busy — exit a task to free one, or add: task auth <name>." >&2; return 1
 }
 
 # 'task auth' — the single hub for Claude credentials (logins). Each login is independent and
@@ -284,7 +325,7 @@ _task_auth(){
       local n="${2:-}"; [ -n "$n" ] || { echo "usage: task auth rm <name>"; return 1; }
       [ -d "$sdir/$n" ] || { echo "task: no login '$n'."; return 1; }
       _task_slot_busy "$n" && { echo "task: login '$n' is in use by a running task — exit it first."; return 1; }
-      rm -rf "$sdir/$n"; echo "removed login '$n'."; return 0 ;;
+      rm -rf "$sdir/$n" "$(_task_resv_file "$n")"; echo "removed login '$n'."; return 0 ;;
     '') : ;;                                              # fall through to list
     -*) echo "usage: task auth [<name> | rm <name>]"; return 1 ;;
     *)  _task_slot_login "$sub" && echo "login '$sub' ready ✓ — a task will pick it up automatically." \
@@ -446,6 +487,7 @@ _task_run(){
     --memory=4g --cpus=2 \
     workstation "${claude_cmd[@]}"
 
+  [ -n "$slot" ] && rm -f "$(_task_resv_file "$slot")" 2>/dev/null   # free the login immediately on exit
   echo "↩  Container disposed. Clone (on host): $dir"
   echo "   When it's clean and pushed, 'task cleanup' will remove it."
 }
