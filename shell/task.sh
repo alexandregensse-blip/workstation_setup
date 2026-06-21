@@ -4,7 +4,8 @@
 #                                                (asks if ambiguous/none); topic → timestamp if omitted.
 #   task resume                                  reopen task clones in new tabs, CONTINUING the Claude session.
 #   task cleanup [-y]                            delete clones that are clean AND fully pushed (asks; -y skips).
-#   task auth                                    (re)login to Claude (stored in <workspace>/.workstation/.claude).
+#   task auth [--slot <name>]                    (re)login to Claude; --slot creates an independent login.
+#   task slots                                   list credential slots (independent logins for parallel tasks).
 #   task help                                    this help (also shown for: task, task -h/--help/?).
 #
 # Container-only: the host has NO Claude/Serena/rtk — they live in the 'workstation' image.
@@ -14,6 +15,7 @@
 _task_base(){ printf '%s' "${WORKSTATION_RUNNING:-${WORKSTATION_HOME:-$HOME/dev}/running}"; }
 _task_wsdir(){ printf '%s' "${WORKSTATION_DIR:-${WORKSTATION_HOME:-$HOME/dev}/.workstation}"; }
 _task_dock(){ if docker info >/dev/null 2>&1; then echo docker; else echo "sudo docker"; fi; }
+_task_slots_dir(){ printf '%s' "$(_task_wsdir)/.claude-slots"; }
 
 _task_help(){
   cat <<'EOF'
@@ -29,7 +31,11 @@ task — isolated Claude sessions in disposable containers.
                                                Asks per clone; -y / --yes deletes without asking.
                                                Clones with uncommitted or unpushed work are kept.
   task settings                                Show your install choices; edit the Claude launch defaults.
-  task auth                                    (Re)login to Claude.
+  task auth [--slot <name>]                    (Re)login to Claude. With --slot <name>, log into an
+                                               INDEPENDENT credential slot (its own token) for running
+                                               many long tasks in parallel — each self-refreshes and
+                                               survives for days. Without slots, tasks share one login.
+  task slots                                   List credential slots and whether each is free or busy.
   task help                                    This help.
 
 Launch flags — set these in your shell (or ~/.bashrc) and EVERY task starts that way:
@@ -183,6 +189,53 @@ _task_settings(){
   echo "✓ updated. Run 'source ~/.bashrc' (or open a new terminal) to apply."
 }
 
+# --- Claude credential SLOTS (independent, self-refreshing logins; one per concurrent task) ---
+# Each slot is an INDEPENDENT Claude login (its own refresh token) under <ws>/.claude-slots/<name>/,
+# used as a task container's CLAUDE_CONFIG_DIR — a writable DIRECTORY, so Claude refreshes its own
+# token in place (a single-file mount forbids the atomic rename Claude uses). Nothing is shared
+# between slots or with the host, so many concurrent multi-day tasks never clobber each other's token
+# (the failure mode of copying ONE login everywhere). A slot is "busy" while a task container labeled
+# workstation.slot=<name> runs. No slots configured → tasks fall back to the single host-synced login.
+
+# List authed slot names (one per line); a slot is "authed" once it has credentials.
+_task_slot_list(){ local sdir s; sdir="$(_task_slots_dir)"; [ -d "$sdir" ] || return 0
+  for s in "$sdir"/*/; do [ -f "${s}.credentials.json" ] && basename "$s"; done; }
+
+# Is slot $1 in use by a running task container right now?
+_task_slot_busy(){ local dock; dock="$(_task_dock)"; [ -n "$($dock ps -q --filter "label=workstation.slot=$1" 2>/dev/null)" ]; }
+
+# Choose the slot for a clone → global _TASK_SLOT (empty = no slots = legacy mode). Sticky per clone
+# (recorded in .git/claude-slot so 'resume' reuses it), else the first free authed slot. Returns 1 if
+# slots exist but all are busy.
+_task_slot_acquire(){
+  local dir="$1" sdir rec cand="" s; sdir="$(_task_slots_dir)"; _TASK_SLOT=""
+  local -a authed; mapfile -t authed < <(_task_slot_list)
+  [ "${#authed[@]}" -gt 0 ] || return 0                       # no slots → legacy mode
+  rec="$(cat "$dir/.git/claude-slot" 2>/dev/null || true)"
+  if [ -n "$rec" ] && [ -f "$sdir/$rec/.credentials.json" ] && ! _task_slot_busy "$rec"; then cand="$rec"
+  else for s in "${authed[@]}"; do _task_slot_busy "$s" || { cand="$s"; break; }; done; fi
+  [ -n "$cand" ] || { echo "task: all ${#authed[@]} Claude slot(s) busy — exit a task to free one, or add: task auth --slot <name>." >&2; return 1; }
+  printf '%s' "$cand" > "$dir/.git/claude-slot"; _TASK_SLOT="$cand"
+}
+
+# 'task slots' — list slots with free/busy + token expiry.
+_task_slots_cmd(){
+  local sdir s exp; sdir="$(_task_slots_dir)"
+  local -a authed; mapfile -t authed < <(_task_slot_list)
+  if [ "${#authed[@]}" -eq 0 ]; then
+    echo "No Claude slots yet. For many parallel long-running tasks, create independent logins:"
+    echo "  task auth --slot <name>      (e.g. task auth --slot a, then --slot b, …)"
+    echo "Each self-refreshes and survives for days. Without slots, tasks share the host-synced login"
+    echo "(fine for one long task at a time)."
+    return 0
+  fi
+  echo "Claude slots — independent logins, each self-refreshing:"
+  for s in "${authed[@]}"; do
+    exp="$(jq -r '(.claudeAiOauth.expiresAt/1000)|todate' "$sdir/$s/.credentials.json" 2>/dev/null || echo '?')"
+    printf '  %-16s %s   token exp: %s\n' "$s" "$(_task_slot_busy "$s" && echo '[busy]' || echo '[free]')" "$exp"
+  done
+}
+
 # Run the container for an existing clone dir (auth + mounts + docker run). Used by start and 'open'.
 _task_run(){
   local dir="$1" slug="$2" resume="${3:-}"
@@ -192,28 +245,6 @@ _task_run(){
   local gh_token; gh_token="$(gh auth token 2>/dev/null || true)"
   [ -z "$gh_token" ] && { echo "task: not logged into GitHub — run 'gh auth login' first."; return 1; }
 
-  local creds="$ws_dir/.claude/.credentials.json"; local -a claude_auth
-  # Keep the task credential fresh. The host's Claude continuously refreshes its OAuth access token,
-  # but our copy under .workstation/.claude is a snapshot taken at install/auth time — it goes stale
-  # and tasks then fail with "Please run /login · API Error: 401". The container can't self-heal:
-  # Claude rewrites .credentials.json by atomic rename, which a single-file bind mount forbids
-  # ("Device or resource busy"). So we re-sync from the host login (read-only on the host: we copy
-  # FROM ~/.claude, never write to it) whenever it's newer. Opt out with WORKSTATION_CLAUDE_NOSYNC=1
-  # (e.g. if tasks should keep their own separate 'task auth' account).
-  local host_creds="$HOME/.claude/.credentials.json"
-  if [ -z "${WORKSTATION_CLAUDE_NOSYNC:-}" ] && [ -f "$host_creds" ] && [ "$host_creds" -nt "$creds" ]; then
-    mkdir -p "$ws_dir/.claude" && cp "$host_creds" "$creds" && chmod 600 "$creds"
-  fi
-  if [ -f "$creds" ]; then claude_auth=(-v "$creds:/home/dev/.claude/.credentials.json:ro")
-  elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then claude_auth=(-e CLAUDE_CODE_OAUTH_TOKEN)
-  else echo "task: no Claude credentials — run 'task auth' (or set CLAUDE_CODE_OAUTH_TOKEN)."; return 1; fi
-
-  # per-machine config overrides (imported prefs / statusline / gh config), over the baked ones
-  local -a cfg_mounts=()
-  [ -f "$ws_dir/.claude/settings.json" ] && cfg_mounts+=(-v "$ws_dir/.claude/settings.json:/home/dev/.claude/settings.json:ro")
-  [ -f "$ws_dir/.claude/statusline.sh" ]  && cfg_mounts+=(-v "$ws_dir/.claude/statusline.sh:/home/dev/.claude/statusline.sh:ro")
-  [ -f "$ws_dir/gh/config.yml" ]          && cfg_mounts+=(-v "$ws_dir/gh/config.yml:/home/dev/.config/gh/config.yml:ro")
-
   # Claude launch flags from env — set these (e.g. in ~/.bashrc) to apply to every task:
   #   WORKSTATION_CLAUDE_MODE   → --permission-mode (auto | acceptEdits | bypassPermissions | default)
   #   WORKSTATION_CLAUDE_MODEL  → --model (alias like 'opus'/'sonnet' or a full id)
@@ -222,16 +253,66 @@ _task_run(){
   [ -n "${WORKSTATION_CLAUDE_MODE:-}" ]   && cflags+=(--permission-mode "$WORKSTATION_CLAUDE_MODE")
   [ -n "${WORKSTATION_CLAUDE_MODEL:-}" ]  && cflags+=(--model "$WORKSTATION_CLAUDE_MODEL")
   [ -n "${WORKSTATION_CLAUDE_EFFORT:-}" ] && cflags+=(--effort "$WORKSTATION_CLAUDE_EFFORT")
-  # startup wrapper (in-container): merge imported host onboarding/account state if present,
-  # auto-trust the mounted /work dir so Claude doesn't ask, then exec claude with the launch flags.
-  [ -f "$ws_dir/.claude/claude-keys.json" ] && cfg_mounts+=(-v "$ws_dir/.claude/claude-keys.json:/seed/claude-keys.json:ro")
-  local -a claude_cmd=(bash -lc '
-    cfg="$HOME/.claude.json"; [ -f "$cfg" ] || printf "{}" > "$cfg"
-    [ -f /seed/claude-keys.json ] && { jq -s ".[0] * .[1]" "$cfg" /seed/claude-keys.json > /tmp/c1 2>/dev/null && mv /tmp/c1 "$cfg"; }
-    jq ".projects[\"/work\"] += {hasTrustDialogAccepted:true, hasCompletedProjectOnboarding:true}" "$cfg" > /tmp/c2 2>/dev/null && mv /tmp/c2 "$cfg"
-    # resume the previous conversation when asked (task resume/open) AND a persisted history exists for /work
-    [ "${WS_RESUME:-0}" = 1 ] && compgen -G "$HOME/.claude/projects/*/*.jsonl" >/dev/null 2>&1 && set -- --continue "$@"
-    exec claude "$@"' _ "${cflags[@]}")
+
+  # Conversation history persists per-clone on the HOST (survives the disposable --rm container; resume
+  # continues it). Inside .git/ so it's out of the worktree and removed with the clone. mkdir first so
+  # the bind source is owned by the host user (uid 1000 = the image's 'dev'), not root-created by docker.
+  local proj="$dir/.git/claude-projects"; mkdir -p "$proj"
+  local -a resume_env=(); [ -n "$resume" ] && resume_env=(-e WS_RESUME=1)
+
+  # Pick a credential slot (independent + self-refreshing) if any are configured; else legacy mode.
+  _task_slot_acquire "$dir" || return 1
+  local slot="$_TASK_SLOT"
+
+  local -a claude_auth=() cfg_mounts=() session=() claude_cmd=()
+  if [ -n "$slot" ]; then
+    # ---- SLOT MODE: CLAUDE_CONFIG_DIR = the slot dir (a writable DIRECTORY) → Claude refreshes its own
+    # independent token in place and persists it there for the next task (survives days). The clone's
+    # history is overlaid at /cfg/projects (resume stays per-clone); the label marks the slot busy.
+    local slot_dir="$ws_dir/.claude-slots/$slot"
+    cfg_mounts=(-v "$slot_dir:/cfg" -v "$proj:/cfg/projects" -e CLAUDE_CONFIG_DIR=/cfg --label "workstation.slot=$slot")
+    [ -f "$ws_dir/.claude/settings.json" ]    && cfg_mounts+=(-v "$ws_dir/.claude/settings.json:/seed/settings.json:ro")
+    [ -f "$ws_dir/.claude/statusline.sh" ]    && cfg_mounts+=(-v "$ws_dir/.claude/statusline.sh:/seed/statusline.sh:ro")
+    [ -f "$ws_dir/.claude/claude-keys.json" ] && cfg_mounts+=(-v "$ws_dir/.claude/claude-keys.json:/seed/claude-keys.json:ro")
+    [ -f "$ws_dir/gh/config.yml" ]            && cfg_mounts+=(-v "$ws_dir/gh/config.yml:/home/dev/.config/gh/config.yml:ro")
+    claude_cmd=(bash -lc '
+      CFG=/cfg; mkdir -p "$CFG"
+      # seed the baked config into the writable slot dir each start (so image updates propagate); the
+      # slot keeps its own .credentials.json (none is baked) and projects/ (mounted) untouched.
+      cp -a /home/dev/.claude/. "$CFG/" 2>/dev/null || true
+      [ -f /seed/settings.json ] && cp -a /seed/settings.json "$CFG/settings.json"
+      [ -f /seed/statusline.sh ] && cp -a /seed/statusline.sh "$CFG/statusline.sh"
+      cfg="$CFG/.claude.json"; [ -f "$cfg" ] || printf "{}" > "$cfg"
+      [ -f /seed/claude-keys.json ] && { jq -s ".[0] * .[1]" "$cfg" /seed/claude-keys.json > /tmp/c1 2>/dev/null && mv /tmp/c1 "$cfg"; }
+      jq ".projects[\"/work\"] += {hasTrustDialogAccepted:true, hasCompletedProjectOnboarding:true}" "$cfg" > /tmp/c2 2>/dev/null && mv /tmp/c2 "$cfg"
+      [ "${WS_RESUME:-0}" = 1 ] && compgen -G "$CFG/projects/*/*.jsonl" >/dev/null 2>&1 && set -- --continue "$@"
+      exec claude "$@"' _ "${cflags[@]}")
+    echo "task: Claude slot '$slot' (independent login, self-refreshing)."
+  else
+    # ---- LEGACY MODE: single host-synced credential mounted read-only. It can't self-refresh (Claude
+    # rewrites .credentials.json by atomic rename, which a single-file bind mount forbids), so it's
+    # fine for one long task at a time but 401s past the token's ~hours lifetime — use slots for many
+    # concurrent long tasks. Re-synced from the host login when newer (host ~/.claude is only READ).
+    local creds="$ws_dir/.claude/.credentials.json"
+    local host_creds="$HOME/.claude/.credentials.json"
+    if [ -z "${WORKSTATION_CLAUDE_NOSYNC:-}" ] && [ -f "$host_creds" ] && [ "$host_creds" -nt "$creds" ]; then
+      mkdir -p "$ws_dir/.claude" && cp "$host_creds" "$creds" && chmod 600 "$creds"
+    fi
+    if [ -f "$creds" ]; then claude_auth=(-v "$creds:/home/dev/.claude/.credentials.json:ro")
+    elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then claude_auth=(-e CLAUDE_CODE_OAUTH_TOKEN)
+    else echo "task: no Claude credentials — run 'task auth' (or 'task auth --slot <name>', or set CLAUDE_CODE_OAUTH_TOKEN)."; return 1; fi
+    [ -f "$ws_dir/.claude/settings.json" ] && cfg_mounts+=(-v "$ws_dir/.claude/settings.json:/home/dev/.claude/settings.json:ro")
+    [ -f "$ws_dir/.claude/statusline.sh" ]  && cfg_mounts+=(-v "$ws_dir/.claude/statusline.sh:/home/dev/.claude/statusline.sh:ro")
+    [ -f "$ws_dir/gh/config.yml" ]          && cfg_mounts+=(-v "$ws_dir/gh/config.yml:/home/dev/.config/gh/config.yml:ro")
+    [ -f "$ws_dir/.claude/claude-keys.json" ] && cfg_mounts+=(-v "$ws_dir/.claude/claude-keys.json:/seed/claude-keys.json:ro")
+    session=(-v "$proj:/home/dev/.claude/projects")
+    claude_cmd=(bash -lc '
+      cfg="$HOME/.claude.json"; [ -f "$cfg" ] || printf "{}" > "$cfg"
+      [ -f /seed/claude-keys.json ] && { jq -s ".[0] * .[1]" "$cfg" /seed/claude-keys.json > /tmp/c1 2>/dev/null && mv /tmp/c1 "$cfg"; }
+      jq ".projects[\"/work\"] += {hasTrustDialogAccepted:true, hasCompletedProjectOnboarding:true}" "$cfg" > /tmp/c2 2>/dev/null && mv /tmp/c2 "$cfg"
+      [ "${WS_RESUME:-0}" = 1 ] && compgen -G "$HOME/.claude/projects/*/*.jsonl" >/dev/null 2>&1 && set -- --continue "$@"
+      exec claude "$@"' _ "${cflags[@]}")
+  fi
 
   # git identity for in-container commits (attribution only — no secret), from host git
   local gname gemail; gname="$(git config --get user.name 2>/dev/null || true)"; gemail="$(git config --get user.email 2>/dev/null || true)"
@@ -250,15 +331,6 @@ _task_run(){
   # optional reliable DNS in the container (set WORKSTATION_DNS="1.1.1.1 8.8.8.8" if the network's
   # own DNS is flaky, e.g. a phone hotspot). Default: inherit the host resolver.
   local -a dns=() d; for d in ${WORKSTATION_DNS:-}; do dns+=(--dns "$d"); done
-
-  # Persist Claude's conversation history on the HOST so a task survives its disposable (--rm)
-  # container and can be resumed. Kept per-clone INSIDE .git/ so it never shows up in the worktree
-  # and is removed automatically when the clone is (cleanup/uninstall). mkdir first so the bind
-  # source is owned by the host user (uid 1000 = the image's 'dev'), not root-created by docker.
-  local proj="$dir/.git/claude-projects"; mkdir -p "$proj"
-  local -a session=(-v "$proj:/home/dev/.claude/projects")
-  # task resume/open set WS_RESUME=1 → the in-container wrapper runs 'claude --continue' (see claude_cmd).
-  local -a resume_env=(); [ -n "$resume" ] && resume_env=(-e WS_RESUME=1)
 
   $dock run -it --rm \
     --name "task-$slug" \
@@ -284,9 +356,21 @@ task() {
     resume)   _task_resume; return $? ;;
     cleanup)  shift; _task_cleanup "$@"; return $? ;;
     settings) _task_settings; return $? ;;
+    slots)    _task_slots_cmd; return $? ;;
     open)    [ -n "${2:-}" ] || { echo "usage: task open <clone-dir>"; return 1; }; _task_run "$2" "$(basename "$2")" resume; return $? ;;
     auth)
       local ws_dir dock; ws_dir="$(_task_wsdir)"; dock="$(_task_dock)"
+      # 'task auth --slot <name>' — log into an INDEPENDENT slot (its own refresh token), written
+      # straight into the slot dir via CLAUDE_CONFIG_DIR. Used for many concurrent long-running tasks.
+      if [ "${2:-}" = "--slot" ]; then
+        local sn="${3:-}"; [ -n "$sn" ] || { echo "usage: task auth --slot <name>"; return 1; }
+        local sdir="$ws_dir/.claude-slots/$sn"; mkdir -p "$sdir"
+        echo "Logging into Claude for slot '$sn' (its OWN independent token) — open the printed URL:"
+        $dock run -it --rm -e CLAUDE_CONFIG_DIR=/cfg -v "$sdir:/cfg" workstation bash -lc 'claude auth login'
+        [ -f "$sdir/.credentials.json" ] && echo "slot '$sn' ready ✓ — a task will pick it up automatically." \
+                                         || echo "slot '$sn' not logged in (re-run 'task auth --slot $sn')."
+        return 0
+      fi
       mkdir -p "$ws_dir/.claude"
       # Offer to (re)use the host login when it exists AND our copy is missing or older than it
       # (a stale snapshot — the cause of "Please run /login" in tasks). _task_run also re-syncs

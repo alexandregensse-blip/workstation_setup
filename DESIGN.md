@@ -125,7 +125,8 @@ task [--here | --at <path>] [repo] [topic]   # start a task (runs in the current
 task resume                                   # reopen clones (checkbox menu), each in a new tab, CONTINUE its Claude session
 task cleanup [-y]                             # delete clones that are clean AND fully pushed
 task settings                                 # show install choices; edit the Claude launch defaults
-task auth                                     # (re)login to Claude, stored in <workspace>/.workstation/.claude
+task auth [--slot <name>]                     # (re)login to Claude; --slot = independent login (see §8)
+task slots                                    # list credential slots (independent logins for parallel tasks)
 ```
 
 1. **`task auth`** — runs `claude auth login` in a throwaway container and persists the
@@ -201,11 +202,24 @@ network with flaky DNS, `WORKSTATION_DNS="1.1.1.1 8.8.8.8"` makes `task` pass th
   (generate once with `claude setup-token`). The host `~/.claude` is never written.
 - **Token freshness.** The stored copy is a snapshot; the host login keeps refreshing its OAuth
   access token, so the copy goes stale and tasks fail with `Please run /login` / `401`. A task
-  container **cannot self-heal**: Claude rewrites `.credentials.json` by atomic rename, which a
-  single-file bind mount rejects (`Device or resource busy`). So `_task_run` **re-syncs the copy
-  from the host login whenever the host file is newer** (still read-only on the host — we copy *from*
-  it), and `task auth` offers the same when its copy is missing or older. Opt out with
-  `WORKSTATION_CLAUDE_NOSYNC=1` (tasks then keep their own independent `task auth` credential).
+  container **cannot self-heal this single shared login**: Claude rewrites `.credentials.json` by
+  atomic rename, which a single-file bind mount rejects (`Device or resource busy`). So `_task_run`
+  **re-syncs the copy from the host login whenever the host file is newer** (still read-only on the
+  host — we copy *from* it), and `task auth` offers the same when its copy is missing or older. Opt
+  out with `WORKSTATION_CLAUDE_NOSYNC=1`. Good for **one long task at a time**; past the token's
+  ~hours lifetime a single shared login `401`s. For parallel long tasks → slots.
+- **Credential slots** (`<ws>/.claude-slots/<name>/`). A slot is an **independent** login (its own
+  refresh token — multiple are fine on one account, like several machines), created by
+  `task auth --slot <name>` (an in-container `claude auth login` writing straight into the slot dir
+  via `CLAUDE_CONFIG_DIR`). `_task_run` borrows a **free** slot (sticky per clone, recorded in
+  `.git/claude-slot`, so resume reuses it; a slot is *busy* while a container labeled
+  `workstation.slot=<name>` runs) and mounts it as the container's `CLAUDE_CONFIG_DIR` — a **writable
+  directory**, so rename works and Claude **refreshes its own token in place**, persisting it for the
+  next task → multi-day sessions survive. The clone's history is overlaid at `/cfg/projects`; baked
+  config is seeded into the slot dir each start. Nothing is shared between slots or with the host, so
+  concurrent refreshes never collide (the hazard of one copied login + refresh-token rotation). No
+  slots configured ⇒ the host-synced single login above (fully backward compatible). `task slots`
+  lists them with free/busy + expiry.
 - **Browser login can't be fully automated** (the "Authorize" click is the security boundary);
   the CLI prints a URL/code and zero-interaction is only possible with a pre-provisioned token.
 - **Docker group**: `usermod -aG docker` only takes effect on next login. Because `sg`/`newgrp`
