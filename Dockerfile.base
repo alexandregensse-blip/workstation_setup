@@ -34,5 +34,5 @@ RUN i=1; until curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/in
 # scripts don't inherit shell functions). Install the real GNU tools (they win on PATH at /usr/bin).
 # Last layer on purpose: rebuilds reuse all the cached toolchain layers above.
 USER root
-RUN apk add --no-cache grep sed gawk coreutils findutils diffutils util-linux flock gzip patch
+RUN apk add --no-cache grep sed gawk coreutils findutils diffutils util-linux flock gzip patch procps
 USER dev
