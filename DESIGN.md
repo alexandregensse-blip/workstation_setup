@@ -115,7 +115,7 @@ Missing flag values fail fast with a clear message (guarded against `set -u`).
 task [--here | --at <path>] [repo] [topic]   # start a task (runs in the current tab)
 task resume                                   # reopen clones (checkbox menu), each in a new tab, CONTINUE its Claude session
 task list                                     # read-only status of all clones (running/idle, login, git state) + logins
-task cleanup [-y]                             # delete clones that are clean AND fully pushed
+task cleanup [-y] | -f | <name>               # delete clones; -f (checklist) or <name> also discards work
 task settings                                 # show/edit features (notifications, language, theme, cpus/ram, DNS, launch defaults)
 task auth [<name> | rm <name>]                # manage Claude logins (independent, self-refreshing; see §8)
 ```
@@ -161,10 +161,14 @@ task auth [<name> | rm <name>]                # manage Claude logins (independen
    the container with `claude --continue` so the saved conversation resumes. **`task list`** is a
    read-only status view (running/idle, which login, git state, + a logins summary; running containers
    are matched to clones by their `/work` mount source via `docker inspect --format`, so no host jq).
-   **`task cleanup`** removes clones that are clean and fully pushed; **`task settings`** edits the
-   features in `<ws>/.config`. `resume`/`list`/`cleanup` scan the default `running/` base **plus** any
-   base used via `--here`/`--at`, recorded in `<ws>/.bases` (so those clones aren't lost). The git
-   "clean + pushed" check is one shared helper (`_task_git_state`) used by both `list` and `cleanup`.
+   **`task cleanup`** removes clones that are clean and fully pushed; `-f`/`--force` opens a **checkbox
+   menu** to discard clones *including* their uncommitted/unpushed work, and `task cleanup <name>`
+   targets matching clone(s) (with `-f` to discard their work). A clone mounted in a **running**
+   container is never deleted (detected via the shared `_task_running_pairs`, same mount-source map as
+   `list`). **`task settings`** edits the features in `<ws>/.config`. `resume`/`list`/`cleanup` scan
+   the default `running/` base **plus** any base used via `--here`/`--at`, recorded in `<ws>/.bases`
+   (so those clones aren't lost). The git "clean + pushed" check is one shared helper (`_task_git_state`)
+   used by both `list` and `cleanup`.
 
 ## 7. The Docker image (`Dockerfile`)
 

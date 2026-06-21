@@ -67,6 +67,8 @@ task --at /path <repo> [topic]   # base = given path
 task resume                      # reopen task clones (pick some in a checkbox menu), each in a new tab, CONTINUING its Claude session
 task list                        # status of every clone: running/idle, which login, git state — plus a logins summary
 task cleanup [-y]                # delete clones that are clean AND fully pushed (asks; -y skips the prompt)
+task cleanup -f                  # checkbox menu to DISCARD clones incl. uncommitted/unpushed work
+task cleanup <name> [-f]         # target clone(s) matching <name>; -f also discards their work
 task settings                    # show/edit features (notifications, language, theme, cpus/ram, DNS, launch defaults)
 task auth                        # list Claude logins (account, free/busy, token expiry)
 task auth <name>                 # browser-login into <name> — an independent, self-refreshing login
@@ -145,6 +147,13 @@ task list
 task cleanup        # asks per clone
 task cleanup -y     # no prompts
 ```
+
+**Throw away a task you don't want to keep** (discards uncommitted/unpushed work — local is disposable):
+```bash
+task cleanup -f             # checkbox menu: tick the ones to discard, confirm once
+task cleanup fix-login -f   # or target one by name
+```
+> A clone mounted in a **running** container is never deleted — exit that task first.
 
 **Get notified when Claude finishes / needs you** (terminal bell + window flash):
 ```bash

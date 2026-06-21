@@ -5,7 +5,8 @@
 #                                                (asks if ambiguous/none); topic → timestamp if omitted.
 #   task resume                                  reopen task clones in new tabs, CONTINUING the Claude session.
 #   task list                                    status of every clone: running/idle, login, git state + logins.
-#   task cleanup [-y]                            delete clones that are clean AND fully pushed (asks; -y skips).
+#   task cleanup [-y] | -f | <name>              delete clones: clean+pushed by default; -f (checklist) or
+#                                                <name> also discards uncommitted/unpushed work.
 #   task settings                                show/edit features (notifications, language, memory, cpus/ram, DNS, …).
 #   task auth [<name> | rm <name>]               manage Claude logins (independent, self-refreshing accounts).
 #   task help                                    this help (also shown for: task, task -h/--help/?).
@@ -61,7 +62,11 @@ task — isolated Claude sessions in disposable containers.
                                                git state) plus a logins summary. (aliases: ls, ps)
   task cleanup [-y]                            Delete task clones that are clean AND fully pushed.
                                                Asks per clone; -y / --yes deletes without asking.
-                                               Clones with uncommitted or unpushed work are kept.
+                                               Clones with uncommitted/unpushed work are kept (need -f).
+  task cleanup -f | --force                    Checkbox menu to pick clones to DISCARD — including their
+                                               uncommitted/unpushed work (asks once before deleting).
+  task cleanup <name> [-f]                     Target clone(s) whose path matches <name>; add -f to also
+                                               discard their uncommitted/unpushed work.
   task settings                                Show/edit features: notifications, language, theme, status
                                                line, memory persistence, DNS, container cpus/ram, and the
                                                Claude launch defaults. Stored in <ws>/.config (no host env),
@@ -234,27 +239,85 @@ _task_resume(){
   done
 }
 
-# cleanup: remove clones that are clean AND fully pushed (git-checked). Asks unless -y/--yes.
+# Remove now-empty <repo> dirs under each scanned base (default + recorded) after a cleanup.
+_task_cleanup_prune(){ local def f base; def="$(_task_base)"; f="$(_task_bases_file)"
+  { printf '%s\n' "$def"; [ -f "$f" ] && cat "$f"; } | sort -u | while IFS= read -r base; do
+    [ -d "$base" ] && find "$base" -mindepth 1 -maxdepth 1 -type d -empty -delete 2>/dev/null
+  done; }
+
+# cleanup: delete task clones.
+#   task cleanup [-y]            clones that are clean AND fully pushed (asks per clone; -y skips)
+#   task cleanup -f|--force      checkbox menu to pick clones to DISCARD — incl. uncommitted/unpushed work
+#   task cleanup <name> [-f]     target clone(s) matching <name> (substring); -f also discards their work
+# A running clone (mounted in a live container) is never deleted — exit it first.
 _task_cleanup(){
-  local yes=0; case "${1:-}" in -y|--yes) yes=1 ;; esac
+  local yes=0 force=0; local -a names=()
+  while [ $# -gt 0 ]; do case "$1" in
+    -y|--yes)   yes=1 ;;
+    -f|--force) force=1 ;;
+    -*)         echo "task cleanup: unknown option '$1' (use -y / -f / <name>)"; return 1 ;;
+    *)          names+=("$1") ;;
+  esac; shift; done
+
   local -a clones; mapfile -t clones < <(_task_all_clones)
   [ "${#clones[@]}" -gt 0 ] || { echo "task: no task clones."; return 0; }
+
+  # clones currently mounted in a live container — never delete those
+  local -A running=(); local src
+  while IFS='|' read -r src _; do [ -n "$src" ] && running["$src"]=1; done < <(_task_running_pairs)
+
+  # narrow to <name> matches (substring on basename / pretty label, case-insensitive)
+  if [ "${#names[@]}" -gt 0 ]; then
+    local -a sel=(); local d nm
+    for d in "${clones[@]}"; do
+      for nm in "${names[@]}"; do
+        if [[ "${d,,}" == *"${nm,,}"* ]]; then sel+=("$d"); break; fi
+      done
+    done
+    [ "${#sel[@]}" -gt 0 ] || { echo "task cleanup: no clone matches: ${names[*]}"; return 1; }
+    clones=("${sel[@]}")
+  fi
+
+  # FORCE CHECKLIST: -f with no explicit name → pick which clones to discard (any state) in a menu
+  if [ "$force" = 1 ] && [ "${#names[@]}" -eq 0 ]; then
+    local -a labels=(); local d
+    for d in "${clones[@]}"; do labels+=("$(_task_clone_label "$d")  [$(_task_git_state "$d")]"); done
+    _task_menu "${labels[@]}"; local rc=$?
+    [ "$rc" = 2 ] && { echo "task: no TTY for the checklist — use 'task cleanup -f <name>'."; return 1; }
+    [ "$rc" = 0 ] || { echo "task: cancelled."; return 0; }
+    local -a picked=(); local i d2
+    for i in "${_TASK_PICKED_IDX[@]}"; do d2="${clones[$i]}"
+      if [ -n "${running[$d2]+x}" ]; then echo "  skip $(_task_clone_label "$d2") (running — exit it first)"; continue; fi
+      picked+=("$d2")
+    done
+    [ "${#picked[@]}" -gt 0 ] || { echo "task: nothing to remove."; return 0; }
+    if [ "$yes" != 1 ] && [ -r /dev/tty ]; then
+      printf '  ⚠ DISCARD %d task(s) and ALL their uncommitted/unpushed work? [y/N]: ' "${#picked[@]}"
+      local a; read -r a < /dev/tty || a=n; case "$a" in y|Y|yes|YES) : ;; *) echo "  cancelled."; return 0 ;; esac
+    fi
+    local removed=0
+    for d in "${picked[@]}"; do rm -rf "$d"; echo "  removed $(_task_clone_label "$d")"; removed=$((removed+1)); done
+    _task_cleanup_prune
+    echo "cleanup: removed $removed (forced)."
+    return 0
+  fi
+
+  # per-clone: default (clean+pushed only) OR named OR -f <name> (force discards work, with a warning)
   local d lbl state removed=0 kept=0 a
   for d in "${clones[@]}"; do
     lbl="$(_task_clone_label "$d")"; state="$(_task_git_state "$d")"
-    if [ "$state" != clean ]; then echo "  keep    $lbl  ($state)"; kept=$((kept+1)); continue; fi
-    if [ "$yes" = 1 ]; then rm -rf "$d"; echo "  removed $lbl"; removed=$((removed+1))
+    if [ -n "${running[$d]+x}" ]; then echo "  keep    $lbl  (running — exit it first)"; kept=$((kept+1)); continue; fi
+    if [ "$state" != clean ] && [ "$force" != 1 ]; then echo "  keep    $lbl  ($state — needs -f to discard)"; kept=$((kept+1)); continue; fi
+    if [ "$yes" = 1 ]; then rm -rf "$d"; echo "  removed $lbl${state:+  ($state)}"; removed=$((removed+1))
     elif [ -r /dev/tty ]; then
-      printf '  delete %s? (clean + pushed) [y/N]: ' "$lbl"; read -r a < /dev/tty || a=n
+      if [ "$state" = clean ]; then printf '  delete %s? (clean + pushed) [y/N]: ' "$lbl"
+      else                          printf '  ⚠ DISCARD %s and its %s work? [y/N]: ' "$lbl" "$state"; fi
+      read -r a < /dev/tty || a=n
       case "$a" in y|Y|yes|YES) rm -rf "$d"; echo "    removed"; removed=$((removed+1)) ;; *) kept=$((kept+1)) ;; esac
     else echo "  (deletable) $lbl"; kept=$((kept+1)); fi
   done
-  # prune now-empty <repo> dirs under each scanned base (default + recorded)
-  local def f base; def="$(_task_base)"; f="$(_task_bases_file)"
-  { printf '%s\n' "$def"; [ -f "$f" ] && cat "$f"; } | sort -u | while IFS= read -r base; do
-    [ -d "$base" ] && find "$base" -mindepth 1 -maxdepth 1 -type d -empty -delete 2>/dev/null
-  done
-  echo "cleanup: removed $removed, kept $kept  (clones with uncommitted/unpushed work are always kept)."
+  _task_cleanup_prune
+  echo "cleanup: removed $removed, kept $kept  (clones with uncommitted/unpushed work need -f to discard)."
 }
 
 # settings: show + edit optional features. Stored in <ws>/.config (NOT host env), applied to the next
@@ -500,17 +563,22 @@ _task_auth(){
   echo "  (task auth <name> to add · task auth rm <name> to remove)"
 }
 
+# Print "source|slot" for each running workstation container: source = the clone's /work mount
+# (so we can map a container to its clone), slot = the login label. Go templates → no jq on the host.
+# Shared by 'list' (running + login) and 'cleanup' (never delete a running clone).
+_task_running_pairs(){
+  local dock cid line; dock="$(_task_dock)"
+  while IFS= read -r cid; do [ -n "$cid" ] || continue
+    line="$($dock inspect -f '{{range .Mounts}}{{if eq .Destination "/work"}}{{.Source}}{{end}}{{end}}|{{index .Config.Labels "workstation.slot"}}' "$cid" 2>/dev/null)" || continue
+    [ -n "${line%%|*}" ] && printf '%s\n' "$line"
+  done < <($dock ps -q --filter ancestor=workstation 2>/dev/null)
+}
+
 # list: read-only status of every task clone — running/idle, which login, git state — plus a logins
 # summary. Aggregates what 'auth' and 'cleanup' show via the shared helpers (so nothing drifts).
 _task_list(){
-  local dock; dock="$(_task_dock)"
-  # Map running workstation containers: /work mount source (= the clone) → slot label (= the login).
-  # Go templates → no jq on the host.
-  local -A run_slot=(); local cid line src slot
-  while IFS= read -r cid; do [ -n "$cid" ] || continue
-    line="$($dock inspect -f '{{range .Mounts}}{{if eq .Destination "/work"}}{{.Source}}{{end}}{{end}}|{{index .Config.Labels "workstation.slot"}}' "$cid" 2>/dev/null)" || continue
-    src="${line%%|*}"; slot="${line#*|}"; [ -n "$src" ] && run_slot["$src"]="$slot"
-  done < <($dock ps -q --filter ancestor=workstation 2>/dev/null)
+  local -A run_slot=(); local src slot
+  while IFS='|' read -r src slot; do run_slot["$src"]="$slot"; done < <(_task_running_pairs)
 
   local -a clones; mapfile -t clones < <(_task_all_clones)
   local c found st
