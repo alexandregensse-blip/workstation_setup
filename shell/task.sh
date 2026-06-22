@@ -263,6 +263,36 @@ _task_cleanup_prune(){ local def f base; def="$(_task_base)"; f="$(_task_bases_f
 #   task cleanup -f|--force      checkbox menu to pick clones to DISCARD — incl. uncommitted/unpushed work
 #   task cleanup <name> [-f]     target clone(s) matching <name> (substring); -f also discards their work
 # A running clone (mounted in a live container) is never deleted — exit it first.
+# The clone's task branch and its remote as "<remote>\t<branch>" — the local branch whose upstream is
+# <remote>/task/* (set when the task was created with 'git push -u'). Empty when there's no such branch.
+_task_clone_branch(){ local d="$1" up
+  while IFS='|' read -r _ up; do
+    case "$up" in */task/*) printf '%s\t%s' "${up%%/*}" "${up#*/}"; return 0 ;; esac
+  done < <(git -C "$d" for-each-ref --format='%(refname:short)|%(upstream:short)' refs/heads 2>/dev/null)
+  return 0; }
+
+# Remove a clone dir; if it tracks a <remote>/task/* branch, optionally drop that remote branch too.
+#   mode: ask = prompt on a TTY · yes = delete without asking · no = leave the branch (default)
+# The remote delete runs from INSIDE the clone (reusing its remote + gh auth) BEFORE the dir is gone.
+_task_remove_clone(){ local d="$1" mode="${2:-no}" rb remote branch do_remote=0
+  rb="$(_task_clone_branch "$d")"; remote="${rb%%$'\t'*}"; branch="${rb#*$'\t'}"
+  # Only consider the remote branch when it STILL exists on the remote (a merged PR may have auto-
+  # deleted it, leaving just a stale local tracking ref) — verify with ls-remote before offering.
+  if [ -n "$rb" ] && [ "$mode" != no ] && git -C "$d" ls-remote --exit-code --heads "$remote" "$branch" >/dev/null 2>&1; then
+    case "$mode" in
+      yes) do_remote=1 ;;
+      ask) if [ -r /dev/tty ]; then
+             printf '      also delete remote branch %s/%s? [y/N]: ' "$remote" "$branch"
+             local a; read -r a < /dev/tty || a=n; case "$a" in y|Y|yes|YES) do_remote=1 ;; esac
+           fi ;;
+    esac
+    if [ "$do_remote" = 1 ]; then
+      if git -C "$d" push "$remote" --delete "$branch" >/dev/null 2>&1; then echo "      deleted remote $remote/$branch"
+      else echo "      (could not delete remote $remote/$branch)"; fi
+    fi
+  fi
+  rm -rf "$d"; }
+
 _task_cleanup(){
   local yes=0 force=0; local -a names=()
   while [ $# -gt 0 ]; do case "$1" in
@@ -308,26 +338,39 @@ _task_cleanup(){
       printf '  ⚠ DISCARD %d task(s) and ALL their uncommitted/unpushed work? [y/N]: ' "${#picked[@]}"
       local a; read -r a < /dev/tty || a=n; case "$a" in y|Y|yes|YES) : ;; *) echo "  cancelled."; return 0 ;; esac
     fi
+    local rmode=no
+    if [ "$yes" != 1 ] && [ -r /dev/tty ]; then
+      printf '  also delete their remote task branches on origin (only those still present)? [y/N]: '
+      local rb; read -r rb < /dev/tty || rb=n; case "$rb" in y|Y|yes|YES) rmode=yes ;; esac
+    fi
     local removed=0
-    for d in "${picked[@]}"; do rm -rf "$d"; echo "  removed $(_task_clone_label "$d")"; removed=$((removed+1)); done
+    for d in "${picked[@]}"; do _task_remove_clone "$d" "$rmode"; echo "  removed $(_task_clone_label "$d")"; removed=$((removed+1)); done
     _task_cleanup_prune
     echo "cleanup: removed $removed (forced)."
     return 0
   fi
 
-  # per-clone: default (clean+pushed only) OR named OR -f <name> (force discards work, with a warning)
+  # per-clone: default (clean+pushed only) OR named OR -f <name> (force discards work, with a warning).
+  # Two passes so the FULL list is on screen before any prompt: pass 1 prints every clone's state and
+  # collects the deletable ones, pass 2 asks. (Pass 1 also avoids a prompt appearing mid-listing while
+  # the per-clone git-state probe is still running.)
   local d lbl state removed=0 kept=0 a
+  local -a todo=(); local -A st=()
   for d in "${clones[@]}"; do
-    lbl="$(_task_clone_label "$d")"; state="$(_task_git_state "$d")"
-    if [ -n "${running[$d]+x}" ]; then echo "  keep    $lbl  (running — exit it first)"; kept=$((kept+1)); continue; fi
-    if [ "$state" != clean ] && [ "$force" != 1 ]; then echo "  keep    $lbl  ($state — needs -f to discard)"; kept=$((kept+1)); continue; fi
-    if [ "$yes" = 1 ]; then rm -rf "$d"; echo "  removed $lbl${state:+  ($state)}"; removed=$((removed+1))
+    lbl="$(_task_clone_label "$d")"; state="$(_task_git_state "$d")"; st["$d"]="$state"
+    if   [ -n "${running[$d]+x}" ];                  then echo "  keep      $lbl  (running — exit it first)"; kept=$((kept+1))
+    elif [ "$state" != clean ] && [ "$force" != 1 ]; then echo "  keep      $lbl  ($state — needs -f to discard)"; kept=$((kept+1))
+    else echo "  deletable $lbl  ($state)"; todo+=("$d"); fi
+  done
+  for d in "${todo[@]}"; do
+    lbl="$(_task_clone_label "$d")"; state="${st[$d]}"
+    if [ "$yes" = 1 ]; then _task_remove_clone "$d" no; echo "  removed $lbl${state:+  ($state)}"; removed=$((removed+1))
     elif [ -r /dev/tty ]; then
       if [ "$state" = clean ]; then printf '  delete %s? (clean + pushed) [y/N]: ' "$lbl"
       else                          printf '  ⚠ DISCARD %s and its %s work? [y/N]: ' "$lbl" "$state"; fi
       read -r a < /dev/tty || a=n
-      case "$a" in y|Y|yes|YES) rm -rf "$d"; echo "    removed"; removed=$((removed+1)) ;; *) kept=$((kept+1)) ;; esac
-    else echo "  (deletable) $lbl"; kept=$((kept+1)); fi
+      case "$a" in y|Y|yes|YES) _task_remove_clone "$d" ask; echo "    removed"; removed=$((removed+1)) ;; *) kept=$((kept+1)) ;; esac
+    else kept=$((kept+1)); fi
   done
   _task_cleanup_prune
   echo "cleanup: removed $removed, kept $kept  (clones with uncommitted/unpushed work need -f to discard)."

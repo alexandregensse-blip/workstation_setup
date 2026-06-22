@@ -167,7 +167,13 @@ task auth [<name> | rm <name>]                # manage Claude logins (independen
    are matched to clones by their `/work` mount source via `docker inspect --format`, so no host jq).
    **`task cleanup`** removes clones that are clean and fully pushed; `-f`/`--force` opens a **checkbox
    menu** to discard clones *including* their uncommitted/unpushed work, and `task cleanup <name>`
-   targets matching clone(s) (with `-f` to discard their work). A clone mounted in a **running**
+   targets matching clone(s) (with `-f` to discard their work). `cleanup` runs in **two passes** —
+   it prints every clone's state first, *then* prompts — so a question never appears before the full
+   list is on screen (the per-clone git probe is slow). On each confirmed deletion it also offers to
+   drop the clone's remote `origin/task/<slug>` branch, but only after verifying with `ls-remote` that
+   the branch still exists (a merged PR may have auto-deleted it, leaving a stale local tracking ref);
+   the local `rm -rf` is unconditional, the remote branch is only removed on an explicit yes and never
+   under `-y` (`_task_clone_branch` + `_task_remove_clone`). A clone mounted in a **running**
    container is never deleted (detected via the shared `_task_running_pairs`, same mount-source map as
    `list`). **`task settings`** edits the features in `<ws>/.config`. `resume`/`list`/`cleanup` scan
    the default `running/` base **plus** any base used via `--here`/`--at`, recorded in `<ws>/.bases`

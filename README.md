@@ -69,6 +69,7 @@ task list                        # status of every clone: running/idle, which lo
 task cleanup [-y]                # delete clones that are clean AND fully pushed (asks; -y skips the prompt)
 task cleanup -f                  # checkbox menu to DISCARD clones incl. uncommitted/unpushed work
 task cleanup <name> [-f]         # target clone(s) matching <name>; -f also discards their work
+                                 #   each confirmed delete also offers to drop its remote task/<slug> branch (only if it still exists)
 task settings                    # show/edit features (notifications, language, theme, cpus/ram, DNS, launch defaults)
 task toolchain [<repo>]          # add per-repo toolchains (Go/Rust/C++…): a dedicated image FROM workstation
 task auth                        # list Claude logins (account, free/busy, token expiry)
@@ -155,6 +156,8 @@ task cleanup -f             # checkbox menu: tick the ones to discard, confirm o
 task cleanup fix-login -f   # or target one by name
 ```
 > A clone mounted in a **running** container is never deleted — exit that task first.
+
+`cleanup` lists every clone's state **first**, then asks — a prompt never appears mid-listing. When you confirm a deletion and the task still has its `origin/task/<slug>` branch on the remote (checked with `ls-remote`, so a PR that auto-deleted it won't be offered), it also asks whether to delete that remote branch. The local `rm` is unconditional; the remote branch is only touched if you say yes (and never under `-y`).
 
 **Get notified when Claude finishes / needs you** (terminal bell + window flash):
 ```bash
