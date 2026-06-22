@@ -647,28 +647,66 @@ _task_repo_key(){
 # bloat another. The 'FROM workstation' line is prepended automatically (don't write your own FROM).
 _task_toolchain_dir(){ printf '%s' "$(_task_wsdir)/toolchains/$1"; }
 
+# Is 'workstation-<key>' built AND current — i.e. the image exists, the Dockerfile hasn't changed
+# since (mtime vs the .image-base stamp), and it was built against today's 'workstation' base id?
+_task_image_fresh(){
+  local key="$1" tdir df stamp img dock baseid curid
+  tdir="$(_task_toolchain_dir "$key")"; df="$tdir/Dockerfile"; stamp="$tdir/.image-base"; img="workstation-$key"; dock="$(_task_dock)"
+  $dock image inspect "$img" >/dev/null 2>&1 || return 1
+  [ "$df" -nt "$stamp" ] && return 1
+  baseid="$($dock image inspect -f '{{.Id}}' workstation 2>/dev/null || true)"
+  curid="$(cat "$stamp" 2>/dev/null || true)"
+  [ -n "$baseid" ] && [ "$curid" = "$baseid" ]
+}
+
+# Build lock for a toolchain key, so concurrent launches (e.g. resuming two tasks of the same repo at
+# once) build the image ONCE — the rest wait, then reuse. Same lock-free pure-bash mutex as the login
+# reservation: hard-link a fully-written temp onto the lock (`ln` fails if it exists). Markers live in a
+# sibling .locks dir (NOT a key dir, so they're never a Dockerfile/build context). A stale lock (>1h:
+# a build that long is broken anyway, or the holder died) is stolen so we never wedge forever.
+_task_build_lock_file(){ printf '%s' "$(_task_wsdir)/toolchains/.locks/$1"; }
+_task_build_lock_acquire(){
+  local l tmp at now; l="$(_task_build_lock_file "$1")"; tmp="$l.$BASHPID"
+  mkdir -p "$(dirname "$l")"
+  printf '%(%s)T' -1 > "$tmp" 2>/dev/null || return 1
+  if ln "$tmp" "$l" 2>/dev/null; then rm -f "$tmp"; return 0; fi
+  at="$(<"$l" 2>/dev/null)"; printf -v now '%(%s)T' -1
+  case "$at" in (*[!0-9]*|'') rm -f "$tmp"; return 1 ;; esac                 # unreadable → just-claimed
+  if [ $(( now - at )) -ge 3600 ]; then rm -f "$l" 2>/dev/null               # stale → steal
+    if ln "$tmp" "$l" 2>/dev/null; then rm -f "$tmp"; return 0; fi; fi
+  rm -f "$tmp"; return 1
+}
+_task_build_lock_release(){ rm -f "$(_task_build_lock_file "$1")" 2>/dev/null; }
+
 # Ensure 'workstation-<key>' is built and current; echo the image name to use. Rebuilds lazily when
 # the image is missing, the Dockerfile changed, or the base 'workstation' image moved (so an
-# `update.sh` self-heals on the next task). Build output is hidden unless it fails. Returns 1 on
-# build failure. Caller falls back to plain 'workstation' when there's no spec.
+# `update.sh` self-heals on the next task), serialized by a build lock so simultaneous launches build
+# once. Build output is hidden unless it fails. Returns 1 on build failure. Caller falls back to
+# plain 'workstation' when there's no spec.
 _task_ensure_repo_image(){
-  local key="$1" tdir img df stamp dock baseid curid need=0
-  tdir="$(_task_toolchain_dir "$key")"; df="$tdir/Dockerfile"; stamp="$tdir/.image-base"
-  img="workstation-$key"; dock="$(_task_dock)"
+  local key="$1" tdir img df stamp dock; tdir="$(_task_toolchain_dir "$key")"
+  df="$tdir/Dockerfile"; stamp="$tdir/.image-base"; img="workstation-$key"; dock="$(_task_dock)"
   [ -f "$df" ] || { printf 'workstation'; return 0; }        # no spec → shared image
+  _task_image_fresh "$key" && { printf '%s' "$img"; return 0; }
+
+  # Need a (re)build. Serialize: first to grab the lock builds; the others wait, then reuse.
+  local waited=0
+  until _task_build_lock_acquire "$key"; do
+    _task_image_fresh "$key" && { printf '%s' "$img"; return 0; }            # someone else finished it
+    [ "$waited" = 0 ] && echo "task: another build of '$img' is running — waiting…" >&2
+    waited=1; sleep 3
+  done
+  if _task_image_fresh "$key"; then _task_build_lock_release "$key"; printf '%s' "$img"; return 0; fi
+
+  echo "task: building repo toolchain image '$img' (first run / spec or base changed)…" >&2
+  local log rc=0 baseid fromline=""; log="$(mktemp)"
   baseid="$($dock image inspect -f '{{.Id}}' workstation 2>/dev/null || true)"
-  $dock image inspect "$img" >/dev/null 2>&1 || need=1
-  [ "$df" -nt "$stamp" ] && need=1
-  curid="$(cat "$stamp" 2>/dev/null || true)"; [ "$curid" != "$baseid" ] && need=1
-  if [ "$need" = 1 ]; then
-    echo "task: building repo toolchain image '$img' (first run / spec or base changed)…" >&2
-    local log rc=0; log="$(mktemp)"
-    local fromline=""; grep -qiE '^[[:space:]]*FROM[[:space:]]' "$df" || fromline="FROM workstation"
-    if { [ -n "$fromline" ] && echo "$fromline"; cat "$df"; } | $dock build -t "$img" -f - "$tdir" >"$log" 2>&1; then
-      printf '%s' "$baseid" > "$stamp"; rm -f "$log"
-    else echo "task: toolchain image build FAILED for '$img' — last lines:" >&2; tail -25 "$log" >&2; rm -f "$log"; return 1; fi
-  fi
-  printf '%s' "$img"
+  grep -qiE '^[[:space:]]*FROM[[:space:]]' "$df" || fromline="FROM workstation"
+  if { [ -n "$fromline" ] && echo "$fromline"; cat "$df"; } | $dock build -t "$img" -f - "$tdir" >"$log" 2>&1; then
+    printf '%s' "$baseid" > "$stamp"
+  else rc=1; echo "task: toolchain image build FAILED for '$img' — last lines:" >&2; tail -25 "$log" >&2; fi
+  rm -f "$log"; _task_build_lock_release "$key"
+  [ "$rc" = 0 ] && printf '%s' "$img"; return "$rc"
 }
 
 # Run the container for an existing clone dir (auth + mounts + docker run). Used by start and 'open'.
