@@ -72,11 +72,13 @@ task — isolated Claude sessions in disposable containers.
                                                line, memory persistence, DNS, container cpus/ram, and the
                                                Claude launch defaults. Stored in <ws>/.config (no host env),
                                                applied to the next task.
-  task toolchain [<repo>]                      Add per-repo toolchains (Go/Rust/C++…). Scaffolds/edits
-                                               <ws>/toolchains/<key>/Dockerfile (host-side, NOT committed
-                                               to the repo); that repo's tasks then run on a dedicated
+  task toolchain                               Manage per-repo toolchains (Go/Rust/C++…) in an interactive
+                                               menu (like 'settings'): add / edit / remove. Specs live in
+                                               <ws>/toolchains/<key>/Dockerfile (host-side, NOT committed to
+                                               the repo); that repo's tasks then run on a dedicated
                                                'workstation-<key>' image (FROM workstation), so one repo's
                                                tools never bloat another. Other repos use the shared image.
+  task toolchain <repo>                        Jump straight to scaffolding/editing that repo's spec.
   task auth                                    List Claude logins (account, free/busy, token expiry).
   task auth <name>                             Browser-login into <name> — an INDEPENDENT, self-refreshing
                                                login (its own token, can be its own Anthropic account).
@@ -858,18 +860,23 @@ _task_resolve_repo(){
   else echo "task: no repo matches '$orig' — pick one (or type owner/name or a URL):" >&2; _task_pick "${known[@]}"; fi
 }
 
-# toolchain: show / scaffold a repo's per-repo toolchain Dockerfile (host-side, NOT committed to the
-# repo). Resolves <repo> to its key, ensures <ws>/toolchains/<key>/Dockerfile exists (writes a
-# template the first time), prints the path, and opens $EDITOR/$VISUAL if set. The next task on that
-# repo rebuilds 'workstation-<key>' automatically.
-_task_toolchain(){
-  local arg="${1:-}" repo r key tdir df ed
-  repo="$(_task_resolve_repo "$arg")" || { echo "task: no repo chosen." >&2; return 1; }
-  [ -n "$repo" ] || { echo "task: no repo." >&2; return 1; }
-  r="${repo%.git}"; r="${r#*github.com[:/]}"; key="$(_task_key_from_repo "$r")"
-  tdir="$(_task_toolchain_dir "$key")"; df="$tdir/Dockerfile"; mkdir -p "$tdir"
-  if [ ! -f "$df" ]; then
-    cat > "$df" <<'TPL'
+# Existing toolchain spec keys (dirs under <ws>/toolchains that carry a Dockerfile), one per line.
+_task_toolchain_list(){ local d root; root="$(_task_wsdir)/toolchains"; [ -d "$root" ] || return 0
+  for d in "$root"/*/; do [ -f "${d}Dockerfile" ] && basename "$d"; done; }
+
+# Open the Dockerfile for key $1 in an editor ($EDITOR/$VISUAL, else nano/vim/vi); print the path if none.
+_task_toolchain_open(){
+  local key="$1" df ed c; df="$(_task_toolchain_dir "$key")/Dockerfile"; [ -f "$df" ] || return 1
+  ed="${EDITOR:-${VISUAL:-}}"; [ -z "$ed" ] && for c in nano vim vi; do command -v "$c" >/dev/null 2>&1 && { ed="$c"; break; }; done
+  if [ -n "$ed" ] && { true >/dev/tty; } 2>/dev/null; then "$ed" "$df" >/dev/tty 2>&1 </dev/tty || true
+  else echo "  edit: $df"; fi
+}
+
+# Create the toolchain dir + template Dockerfile for key $1 if missing.
+_task_toolchain_scaffold(){
+  local key="$1" tdir df; tdir="$(_task_toolchain_dir "$key")"; df="$tdir/Dockerfile"; mkdir -p "$tdir"
+  [ -f "$df" ] && { echo "  spec: $df"; return 0; }
+  cat > "$df" <<'TPL'
 # Per-repo toolchains for this repo's task containers. Built as 'workstation-<key>' FROM the shared
 # 'workstation' image — do NOT add your own FROM. apk = Wolfi packages. Runs as root; end as 'dev'.
 USER root
@@ -879,11 +886,59 @@ USER root
 # RUN rustup toolchain install stable nightly && rustup component add clippy miri
 USER dev
 TPL
-    echo "created template: $df"
-  else echo "toolchain spec: $df"; fi
-  echo "  edit it, then the next 'task ${repo##*/} …' rebuilds 'workstation-$key' (FROM workstation)."
-  ed="${EDITOR:-${VISUAL:-}}"
-  [ -n "$ed" ] && { true >/dev/tty; } 2>/dev/null && "$ed" "$df" >/dev/tty 2>&1 </dev/tty || true
+  echo "  created: $df"
+}
+
+# Remove a toolchain spec (and its built image), after confirmation.
+_task_toolchain_remove(){
+  local key="$1" tdir img dock a; tdir="$(_task_toolchain_dir "$key")"; img="workstation-$key"; dock="$(_task_dock)"
+  printf '  remove toolchain "%s" (spec dir + image %s)? [y/N]: ' "$key" "$img" > /dev/tty
+  read -r a < /dev/tty || a=n; case "$a" in y|Y|yes|YES) : ;; *) echo "  kept" > /dev/tty; return 0 ;; esac
+  $dock rmi -f "$img" >/dev/null 2>&1
+  rm -rf "$tdir"
+  echo "  removed toolchain '$key'." > /dev/tty
+}
+
+# Resolve a repo arg → its toolchain key (owner-repo), scaffold + open its Dockerfile.
+_task_toolchain_add(){
+  local repo r key
+  repo="$(_task_resolve_repo "${1:-}")" || { echo "task: no repo chosen." >&2; return 1; }
+  [ -n "$repo" ] || { echo "task: no repo." >&2; return 1; }
+  r="${repo%.git}"; r="${r#*github.com[:/]}"; key="$(_task_key_from_repo "$r")"
+  _task_toolchain_scaffold "$key"
+  echo "  the next 'task ${repo##*/} …' rebuilds 'workstation-$key' (FROM workstation)."
+  _task_toolchain_open "$key"
+}
+
+# toolchain: manage per-repo toolchains (host-side, NOT committed to the repo) — like 'settings'.
+#   task toolchain            interactive menu: add / edit / remove specs (arrow keys)
+#   task toolchain <repo>     jump straight to scaffolding/editing that repo's spec
+_task_toolchain(){
+  [ -n "${1:-}" ] && { _task_toolchain_add "$1"; return $?; }
+  if ! { true >/dev/tty; } 2>/dev/null; then          # non-interactive: just list
+    echo "Per-repo toolchains ($(_task_wsdir)/toolchains):"
+    local k; for k in $(_task_toolchain_list); do printf '  %s\n' "$k"; done
+    return 0
+  fi
+  local dock; dock="$(_task_dock)"
+  while :; do
+    local -a keys; mapfile -t keys < <(_task_toolchain_list)
+    local -a rows=(); local k built
+    for k in "${keys[@]}"; do
+      $dock image inspect "workstation-$k" >/dev/null 2>&1 && built="image built" || built="not built yet"
+      rows+=("$(printf '%-42s %s' "$k" "$built")")
+    done
+    rows+=("➕ Add toolchains for a repo…" "✔ Done")
+    _task_select "Per-repo toolchains — pick one" "${rows[@]}" || break
+    if   [ "$_TASK_SEL_IDX" -ge "$(( ${#keys[@]} + 1 ))" ]; then break                       # Done
+    elif [ "$_TASK_SEL_IDX" -eq "${#keys[@]}" ]; then _task_toolchain_add ""                 # Add
+    else
+      local key="${keys[$_TASK_SEL_IDX]}"
+      _task_select "Toolchain '$key'" "Edit Dockerfile" "Remove" "Cancel" || continue
+      case "$_TASK_SEL_IDX" in 0) _task_toolchain_open "$key" ;; 1) _task_toolchain_remove "$key" ;; esac
+    fi
+  done
+  echo "✓ Toolchains live in $(_task_wsdir)/toolchains — applied (rebuilt) on each repo's next task."
 }
 
 task() {

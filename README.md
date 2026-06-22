@@ -175,7 +175,8 @@ WORKSTATION_CPUS=1 WORKSTATION_RAM=2g task autodev small-job   # or one-off
 **Give one repo extra toolchains** (e.g. Go/Rust/C++ to build & run its test mockups) without bloating
 the others — that repo gets its own image `FROM workstation`:
 ```bash
-task toolchain myrepo     # scaffolds ~/dev/.workstation/toolchains/<owner>-<repo>/Dockerfile + opens $EDITOR
+task toolchain            # interactive menu (like 'settings'): add / edit / remove per-repo toolchains
+task toolchain myrepo     # or jump straight in: scaffolds toolchains/<owner>-<repo>/Dockerfile + opens $EDITOR
 # add e.g.:  USER root
 #            RUN apk add --no-cache go-1.25 rustup clang-17 lld-17 cmake ninja-build build-base
 #            RUN rustup toolchain install stable nightly && rustup component add clippy miri

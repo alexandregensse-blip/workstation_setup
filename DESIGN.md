@@ -206,8 +206,10 @@ prepended automatically) and runs that repo's tasks on it; repos with no spec us
 `workstation` image, so one repo's toolchains never leak into another. The build is **lazy and
 cached**: `_task_ensure_repo_image` rebuilds only when the image is missing, the Dockerfile changed
 (mtime vs a `.image-base` stamp), or the base `workstation` image id moved — so an `update.sh`
-self-heals every overlay on its next task. `task toolchain [<repo>]` scaffolds/opens the Dockerfile;
-`uninstall.sh` removes all `workstation-*` overlays. Build output is hidden unless it fails.
+self-heals every overlay on its next task. `task toolchain` opens an **interactive menu** (like
+`settings`: arrow keys) to **add / edit / remove** specs — each row shows whether its image is built;
+`task toolchain <repo>` jumps straight to scaffolding/editing one. `uninstall.sh` removes all
+`workstation-*` overlays. Build output is hidden unless it fails.
 
 ## 7a. Networking (containers ↔ Anthropic)
 
