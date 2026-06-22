@@ -33,6 +33,7 @@ self-contained `<workspace>/.workstation` dir** — the host is left in its init
 | `update.sh` | Pulls latest + rebuilds the image (see §12). |
 | `Dockerfile.base` | The heavy **`workstation-base`** image — the toolchain (Claude/Serena/rtk/uv + apk tools), built once and reused. |
 | `Dockerfile` | The thin **`workstation`** image (`FROM workstation-base`) — bakes config/hooks; rebuilt on changes. |
+| `<ws>/toolchains/<key>/Dockerfile` | Optional **per-repo** toolchains (host-side, not committed) → image `workstation-<key>` (`FROM workstation`). Built on demand by `task toolchain` / the next task (see §7). |
 | `shell/task.sh` | The `task` shell function, **sourced straight from the clone**. |
 | `.github/workflows/shellcheck.yml` | CI lint (shellcheck) over the shell scripts; signal-only. |
 | `claude/CLAUDE.md` | Global code-exploration policy (Serena). Baked into the image at `~/.claude/CLAUDE.md`. |
@@ -117,6 +118,7 @@ task resume                                   # reopen clones (checkbox menu), e
 task list                                     # read-only status of all clones (running/idle, login, git state) + logins
 task cleanup [-y] | -f | <name>               # delete clones; -f (checklist) or <name> also discards work
 task settings                                 # show/edit features (notifications, language, theme, cpus/ram, DNS, launch defaults)
+task toolchain [<repo>]                       # scaffold/edit a repo's extra toolchains → its own image (see §7)
 task auth [<name> | rm <name>]                # manage Claude logins (independent, self-refreshing; see §8)
 ```
 
@@ -136,8 +138,9 @@ task auth [<name> | rm <name>]                # manage Claude logins (independen
    vanish with the clone. Curated list in `_task_mcp_artifacts` (extend per MCP).
 5. **Branch** `task/<slug>` and push it.
 6. **Run** Claude inside the container: clone mounted at `/work`, `GH_TOKEN` injected, Claude
-   credentials mounted read-only, `--rm` (disposable). Resource limits are configurable: `cpus`/`ram`
-   from `<ws>/.config` → `--cpus`/`--memory` (defaults `2` / `4g`). The conversation history
+   credentials mounted read-only, `--rm` (disposable). The **image** is `workstation-<key>` if the repo
+   has a per-repo toolchain spec (built/refreshed lazily, see §7), else the shared `workstation`.
+   Resource limits are configurable: `cpus`/`ram` from `<ws>/.config` → `--cpus`/`--memory` (defaults `2` / `4g`). The conversation history
    is persisted on the host under the clone's `.git/claude-projects` (out of the worktree, removed
    with the clone). **Features** from `<ws>/.config` (`task settings`) apply here: `claude_mode`/
    `claude_model`/`claude_effort` → launch flags; `notify`/`lang`/`theme`/`statusline` → merged onto
@@ -194,6 +197,17 @@ On-disk image ≈ **830 MB** (Claude Code alone ~234 MB).
 reused, and a thin `workstation` (`Dockerfile`, `FROM workstation-base`) for config/hooks — so
 changing the dotfiles never re-downloads the toolchain. `update.sh` rebuilds only the layer whose
 inputs changed (§12).
+
+**Per-repo toolchains (optional third layer).** A repo that needs extra tools (Go/Rust/C++…) without
+bloating every other task declares them in `<ws>/toolchains/<key>/Dockerfile` (`<key>` = the
+`<owner>-<repo>` from `_task_repo_key`; **host-side, NOT committed to the repo** — same host-clean
+principle as the rest). `task` builds `workstation-<key>` **`FROM workstation`** (the line is
+prepended automatically) and runs that repo's tasks on it; repos with no spec use the shared
+`workstation` image, so one repo's toolchains never leak into another. The build is **lazy and
+cached**: `_task_ensure_repo_image` rebuilds only when the image is missing, the Dockerfile changed
+(mtime vs a `.image-base` stamp), or the base `workstation` image id moved — so an `update.sh`
+self-heals every overlay on its next task. `task toolchain [<repo>]` scaffolds/opens the Dockerfile;
+`uninstall.sh` removes all `workstation-*` overlays. Build output is hidden unless it fails.
 
 ## 7a. Networking (containers ↔ Anthropic)
 

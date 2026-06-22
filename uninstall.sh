@@ -68,7 +68,14 @@ if [ -f "$HOME/.bashrc" ] && grep -q '# >>> workstation >>>' "$HOME/.bashrc"; th
   else echo "  kept"; note_kept "'task' block in ~/.bashrc"; fi
 fi
 
-# 2. Docker images (the thin image and the toolchain base)
+# 2. Docker images: per-repo toolchain overlays (workstation-<key>), then the thin image + base.
+derived="$(dock images --format '{{.Repository}}' 2>/dev/null | grep -E '^workstation-' | grep -vx 'workstation-base' | sort -u || true)"
+for img in $derived; do
+  log "docker image '$img' (per-repo toolchain overlay)"
+  if confirm "Remove the Docker image '$img'?"; then
+    if dock rmi -f "$img" >/dev/null 2>&1; then echo "  removed"; note_removed "Docker image '$img'"; else echo "  (in use / already gone)"; fi
+  else echo "  kept"; note_kept "Docker image '$img'"; fi
+done
 for img in workstation workstation-base; do
   if dock image inspect "$img" >/dev/null 2>&1; then
     log "docker image '$img'"

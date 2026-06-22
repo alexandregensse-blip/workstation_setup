@@ -82,6 +82,11 @@ else
   fi
   echo "Rebuilding workstation image (config)…"
   qbuild -t workstation "$WS_DIR" || exit 1
+  # Per-repo toolchain overlays (workstation-<key>, FROM workstation) self-heal: each rebuilds on its
+  # next task because the base image id changed. Just let the user know they aren't rebuilt eagerly.
+  if dock images --format '{{.Repository}}' 2>/dev/null | grep -vx 'workstation-base' | grep -q '^workstation-'; then
+    echo "  (per-repo toolchain images rebuild automatically on their next task)"
+  fi
 fi
 
 echo "✓ Up to date."

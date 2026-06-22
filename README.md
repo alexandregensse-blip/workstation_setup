@@ -70,6 +70,7 @@ task cleanup [-y]                # delete clones that are clean AND fully pushed
 task cleanup -f                  # checkbox menu to DISCARD clones incl. uncommitted/unpushed work
 task cleanup <name> [-f]         # target clone(s) matching <name>; -f also discards their work
 task settings                    # show/edit features (notifications, language, theme, cpus/ram, DNS, launch defaults)
+task toolchain [<repo>]          # add per-repo toolchains (Go/Rust/C++…): a dedicated image FROM workstation
 task auth                        # list Claude logins (account, free/busy, token expiry)
 task auth <name>                 # browser-login into <name> — an independent, self-refreshing login
 task auth rm <name>              # remove a login
@@ -171,6 +172,20 @@ task settings                                  # set  cpus = 4,  ram = 8g
 WORKSTATION_CPUS=1 WORKSTATION_RAM=2g task autodev small-job   # or one-off
 ```
 
+**Give one repo extra toolchains** (e.g. Go/Rust/C++ to build & run its test mockups) without bloating
+the others — that repo gets its own image `FROM workstation`:
+```bash
+task toolchain myrepo     # scaffolds ~/dev/.workstation/toolchains/<owner>-<repo>/Dockerfile + opens $EDITOR
+# add e.g.:  USER root
+#            RUN apk add --no-cache go-1.25 rustup clang-17 lld-17 cmake ninja-build build-base
+#            RUN rustup toolchain install stable nightly && rustup component add clippy miri
+#            USER dev
+task myrepo build-mockups # first task on myrepo builds 'workstation-<owner>-<repo>' (FROM workstation), then runs on it
+```
+The Dockerfile lives **host-side** (`<workspace>/.workstation/toolchains/`), not committed to the repo.
+It's rebuilt automatically when you edit it or after a base `update.sh`. Repos with no toolchain spec
+keep using the shared `workstation` image. `FROM workstation` is prepended for you — don't add your own.
+
 **Override one setting for a single task** (env var — never written to your shell config):
 ```bash
 WORKSTATION_CLAUDE_MODEL=sonnet task autodev quick-experiment
@@ -267,10 +282,13 @@ Base: **Chainguard Wolfi** (`cgr.dev/chainguard/wolfi-base`) — a minimal, **gl
 findutils/diffutils/util-linux/procps/…) so in-container scripts behave like a normal GNU box, not
 busybox. On-disk ≈ **830 MB** (Claude Code alone is ~234 MB); `dev` user at uid 1000.
 
-Built in **two layers**: a heavy **`workstation-base`** (the toolchain, from `Dockerfile.base`)
+Built in **layers**: a heavy **`workstation-base`** (the toolchain, from `Dockerfile.base`)
 built **once and reused**, and the thin **`workstation`** (config + hooks, from `Dockerfile`,
 `FROM workstation-base`) rebuilt on changes — so changing the dotfiles **never re-downloads the
 toolchain**. `update.sh` rebuilds only what changed; `--fresh` forces a from-scratch base for the latest tools.
+A repo that needs extra tools gets a third, **per-repo** layer **`workstation-<owner>-<repo>`**
+(`FROM workstation`), built on demand from its own `toolchains/<key>/Dockerfile` — see
+[`task toolchain`](#work) — so one repo's Go/Rust/C++ stack never lands in another's tasks.
 
 ## Update
 

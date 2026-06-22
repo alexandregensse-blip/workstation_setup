@@ -8,6 +8,7 @@
 #   task cleanup [-y] | -f | <name>              delete clones: clean+pushed by default; -f (checklist) or
 #                                                <name> also discards uncommitted/unpushed work.
 #   task settings                                show/edit features (notifications, language, memory, cpus/ram, DNS, …).
+#   task toolchain [<repo>]                      scaffold/edit a repo's extra toolchains (its own image, FROM workstation).
 #   task auth [<name> | rm <name>]               manage Claude logins (independent, self-refreshing accounts).
 #   task help                                    this help (also shown for: task, task -h/--help/?).
 #
@@ -71,6 +72,11 @@ task — isolated Claude sessions in disposable containers.
                                                line, memory persistence, DNS, container cpus/ram, and the
                                                Claude launch defaults. Stored in <ws>/.config (no host env),
                                                applied to the next task.
+  task toolchain [<repo>]                      Add per-repo toolchains (Go/Rust/C++…). Scaffolds/edits
+                                               <ws>/toolchains/<key>/Dockerfile (host-side, NOT committed
+                                               to the repo); that repo's tasks then run on a dedicated
+                                               'workstation-<key>' image (FROM workstation), so one repo's
+                                               tools never bloat another. Other repos use the shared image.
   task auth                                    List Claude logins (account, free/busy, token expiry).
   task auth <name>                             Browser-login into <name> — an INDEPENDENT, self-refreshing
                                                login (its own token, can be its own Anthropic account).
@@ -617,16 +623,50 @@ _task_ignore_mcp(){
   done < <(_task_mcp_artifacts)
 }
 
-# Memory key for a clone: "<owner>-<repo>" from its GitHub origin (lowercased, sanitized) so two
-# same-named repos from different owners don't share auto-memory. Falls back to the clone's parent dir
-# name (the short repo name) when there's no parseable github origin.
+# Normalize "owner/name" → a stable key "owner-name" (lowercase, sanitized) — also a valid Docker
+# image-name fragment. Used for the memory dir AND the per-repo toolchain image, so they agree.
+_task_key_from_repo(){ local r="${1,,}"; r="${r//\//-}"; printf '%s' "${r//[^a-z0-9._-]/-}"; }
+
+# Memory/toolchain key for a clone: "<owner>-<repo>" from its GitHub origin, so two same-named repos
+# from different owners stay separate. Falls back to the clone's parent dir name (the short repo name)
+# when there's no parseable github origin.
 _task_repo_key(){
   local dir="$1" url r
   url="$(git -C "$dir" remote get-url origin 2>/dev/null)" || url=""
   r="${url%.git}"; r="${r#*github.com[:/]}"                 # owner/name for github http or ssh remotes
-  if [ -n "$r" ] && [ "$r" != "${url%.git}" ] && [[ "$r" == */* ]]; then
-    r="${r//\//-}"; r="${r,,}"; printf '%s' "${r//[^a-z0-9._-]/-}"
+  if [ -n "$r" ] && [ "$r" != "${url%.git}" ] && [[ "$r" == */* ]]; then _task_key_from_repo "$r"
   else printf '%s' "$(basename "$(dirname "$dir")")"; fi
+}
+
+# Per-repo TOOLCHAIN image. A repo that needs extra tools (Go/Rust/C++…) gets a Dockerfile at
+# <ws>/toolchains/<key>/Dockerfile (host-side, NOT committed to the repo). `task` builds an image
+# 'workstation-<key>' (FROM workstation — the shared image is the base) and runs that repo's tasks
+# with it; repos without a spec use the plain 'workstation' image. So one repo's toolchains never
+# bloat another. The 'FROM workstation' line is prepended automatically (don't write your own FROM).
+_task_toolchain_dir(){ printf '%s' "$(_task_wsdir)/toolchains/$1"; }
+
+# Ensure 'workstation-<key>' is built and current; echo the image name to use. Rebuilds lazily when
+# the image is missing, the Dockerfile changed, or the base 'workstation' image moved (so an
+# `update.sh` self-heals on the next task). Build output is hidden unless it fails. Returns 1 on
+# build failure. Caller falls back to plain 'workstation' when there's no spec.
+_task_ensure_repo_image(){
+  local key="$1" tdir img df stamp dock baseid curid need=0
+  tdir="$(_task_toolchain_dir "$key")"; df="$tdir/Dockerfile"; stamp="$tdir/.image-base"
+  img="workstation-$key"; dock="$(_task_dock)"
+  [ -f "$df" ] || { printf 'workstation'; return 0; }        # no spec → shared image
+  baseid="$($dock image inspect -f '{{.Id}}' workstation 2>/dev/null || true)"
+  $dock image inspect "$img" >/dev/null 2>&1 || need=1
+  [ "$df" -nt "$stamp" ] && need=1
+  curid="$(cat "$stamp" 2>/dev/null || true)"; [ "$curid" != "$baseid" ] && need=1
+  if [ "$need" = 1 ]; then
+    echo "task: building repo toolchain image '$img' (first run / spec or base changed)…" >&2
+    local log rc=0; log="$(mktemp)"
+    local fromline=""; grep -qiE '^[[:space:]]*FROM[[:space:]]' "$df" || fromline="FROM workstation"
+    if { [ -n "$fromline" ] && echo "$fromline"; cat "$df"; } | $dock build -t "$img" -f - "$tdir" >"$log" 2>&1; then
+      printf '%s' "$baseid" > "$stamp"; rm -f "$log"
+    else echo "task: toolchain image build FAILED for '$img' — last lines:" >&2; tail -25 "$log" >&2; rm -f "$log"; return 1; fi
+  fi
+  printf '%s' "$img"
 }
 
 # Run the container for an existing clone dir (auth + mounts + docker run). Used by start and 'open'.
@@ -658,6 +698,12 @@ _task_run(){
     return 1
   fi
 
+  # Repo key (shared by memory + toolchain image). If this repo declares a toolchain Dockerfile, run
+  # with its 'workstation-<key>' image (built/refreshed lazily); else the shared 'workstation'. Resolve
+  # BEFORE acquiring a login so a build failure can't leave a reservation behind.
+  local _repokey image; _repokey="$(_task_repo_key "$dir")"
+  image="$(_task_ensure_repo_image "$_repokey")" || return 1
+
   # Claude launch flags from the config (env override wins; 'task settings' edits them):
   # claude_mode → --permission-mode, claude_model → --model, claude_effort → --effort.
   local -a cflags=()
@@ -681,7 +727,7 @@ _task_run(){
   local _mem _memdir _wsmem=""; _mem="$(_task_cfg memory)"; [ -z "$_mem" ] && _mem=repo
   if [ "$_mem" != off ]; then
     if [ "$_mem" = global ]; then _memdir="$ws_dir/.memory/_global"
-    else _memdir="$ws_dir/.memory/$(_task_repo_key "$dir")"; fi
+    else _memdir="$ws_dir/.memory/$_repokey"; fi
     mkdir -p "$_memdir"
     memmount=(-v "$_memdir:/memory"); _wsmem=/memory
   fi
@@ -784,11 +830,60 @@ _task_run(){
     "${memmount[@]}" \
     "${resume_env[@]}" \
     --memory="${_ram:-4g}" --cpus="${_cpus:-2}" \
-    workstation "${claude_cmd[@]}"
+    "$image" "${claude_cmd[@]}"
 
   [ -n "$slot" ] && rm -f "$(_task_resv_file "$slot")" 2>/dev/null   # free the login immediately on exit
   echo "↩  Container disposed. Clone (on host): $dir"
   echo "   When it's clean and pushed, 'task cleanup' will remove it."
+}
+
+# Resolve a repo argument to "owner/name": an explicit owner/name or URL is taken as-is; otherwise
+# fuzzy-matched against your gh repos (exact short-name, then substring), prompting the arrow picker
+# when ambiguous/unmatched/empty. Echoes the result on stdout (info lines go to stderr); 1 on cancel.
+_task_resolve_repo(){
+  local repo="$1" orig="$1"
+  case "$repo" in */*|*://*) printf '%s\n' "$repo"; return 0 ;; esac
+  local -a known=(); mapfile -t known < <(gh repo list --limit 200 --json nameWithOwner --jq '.[].nameWithOwner' 2>/dev/null)
+  [ -z "$repo" ] && { _task_pick "${known[@]}"; return $?; }
+  [ "${#known[@]}" -gt 0 ] || { printf '%s\n' "$repo"; return 0; }       # offline / no gh → take as-is
+  local -a exact=() subs=(); local r name
+  for r in "${known[@]}"; do name="${r##*/}"
+    if   [[ "${name,,}" == "${repo,,}" ]]; then exact+=("$r")
+    elif [[ "${name,,}" == *"${repo,,}"* || "${repo,,}" == *"${name,,}"* ]]; then subs+=("$r"); fi
+  done
+  if   [ "${#exact[@]}" -eq 1 ]; then printf '%s\n' "${exact[0]}"
+  elif [ "${#exact[@]}" -gt 1 ]; then echo "task: '$orig' matches several repos — pick one:" >&2; _task_pick "${exact[@]}"
+  elif [ "${#subs[@]}"  -eq 1 ]; then echo "task: '$orig' → ${subs[0]}" >&2; printf '%s\n' "${subs[0]}"
+  elif [ "${#subs[@]}"  -gt 1 ]; then echo "task: '$orig' matches several repos — pick one:" >&2; _task_pick "${subs[@]}"
+  else echo "task: no repo matches '$orig' — pick one (or type owner/name or a URL):" >&2; _task_pick "${known[@]}"; fi
+}
+
+# toolchain: show / scaffold a repo's per-repo toolchain Dockerfile (host-side, NOT committed to the
+# repo). Resolves <repo> to its key, ensures <ws>/toolchains/<key>/Dockerfile exists (writes a
+# template the first time), prints the path, and opens $EDITOR/$VISUAL if set. The next task on that
+# repo rebuilds 'workstation-<key>' automatically.
+_task_toolchain(){
+  local arg="${1:-}" repo r key tdir df ed
+  repo="$(_task_resolve_repo "$arg")" || { echo "task: no repo chosen." >&2; return 1; }
+  [ -n "$repo" ] || { echo "task: no repo." >&2; return 1; }
+  r="${repo%.git}"; r="${r#*github.com[:/]}"; key="$(_task_key_from_repo "$r")"
+  tdir="$(_task_toolchain_dir "$key")"; df="$tdir/Dockerfile"; mkdir -p "$tdir"
+  if [ ! -f "$df" ]; then
+    cat > "$df" <<'TPL'
+# Per-repo toolchains for this repo's task containers. Built as 'workstation-<key>' FROM the shared
+# 'workstation' image — do NOT add your own FROM. apk = Wolfi packages. Runs as root; end as 'dev'.
+USER root
+# RUN apk add --no-cache go-1.25 golangci-lint rustup \
+#     clang-17 clang-17-extras compiler-rt-17 binutils lld-17 make cmake ninja-build \
+#     glibc-dev build-base
+# RUN rustup toolchain install stable nightly && rustup component add clippy miri
+USER dev
+TPL
+    echo "created template: $df"
+  else echo "toolchain spec: $df"; fi
+  echo "  edit it, then the next 'task ${repo##*/} …' rebuilds 'workstation-$key' (FROM workstation)."
+  ed="${EDITOR:-${VISUAL:-}}"
+  [ -n "$ed" ] && { true >/dev/tty; } 2>/dev/null && "$ed" "$df" >/dev/tty 2>&1 </dev/tty || true
 }
 
 task() {
@@ -798,6 +893,7 @@ task() {
     cleanup)  shift; _task_cleanup "$@"; return $? ;;
     list|ls|ps) _task_list; return $? ;;
     settings) _task_settings; return $? ;;
+    toolchain|toolchains) shift; _task_toolchain "$@"; return $? ;;
     open)    [ -n "${2:-}" ] || { echo "usage: task open <clone-dir>"; return 1; }; _task_run "$2" "$(basename "$2")" resume; return $? ;;
     auth)    shift; _task_auth "$@"; return $? ;;
   esac
@@ -817,33 +913,9 @@ task() {
   # (so `task list` matches running containers to their clone, and `.bases` doesn't get dup entries).
   base="$(realpath -m "$base" 2>/dev/null || printf '%s' "$base")"
 
-  local repo="${1:-}" topic="${2:-}" orig="${1:-}"
-
-  # resolve the repo: explicit (owner/name or URL) as-is, else fuzzy-matched to your gh repos
-  case "$repo" in
-    */*|*://*) : ;;
-    *)
-      local -a known=()
-      mapfile -t known < <(gh repo list --limit 200 --json nameWithOwner --jq '.[].nameWithOwner' 2>/dev/null)
-      if [ -z "$repo" ]; then
-        [ -r /dev/tty ] || { echo "usage: task [--here | --at <path>] <repo> [topic]   (try 'task help')"; return 1; }
-        repo="$(_task_pick "${known[@]}")" || { echo "task: no repo chosen."; return 1; }
-      elif [ "${#known[@]}" -gt 0 ]; then
-        local -a exact=() subs=(); local r name
-        for r in "${known[@]}"; do
-          name="${r##*/}"
-          if   [[ "${name,,}" == "${repo,,}" ]]; then exact+=("$r")
-          elif [[ "${name,,}" == *"${repo,,}"* || "${repo,,}" == *"${name,,}"* ]]; then subs+=("$r"); fi
-        done
-        if   [ "${#exact[@]}" -eq 1 ]; then repo="${exact[0]}"
-        elif [ "${#exact[@]}" -gt 1 ]; then echo "task: '$orig' matches several repos — pick one:"; repo="$(_task_pick "${exact[@]}")" || { echo "task: cancelled."; return 1; }
-        elif [ "${#subs[@]}"  -eq 1 ]; then echo "task: '$orig' → ${subs[0]}"; repo="${subs[0]}"
-        elif [ "${#subs[@]}"  -gt 1 ]; then echo "task: '$orig' matches several repos — pick one:"; repo="$(_task_pick "${subs[@]}")" || { echo "task: cancelled."; return 1; }
-        else echo "task: no repo matches '$orig' — pick one (or type owner/name or a URL):"; repo="$(_task_pick "${known[@]}")" || { echo "task: cancelled."; return 1; }
-        fi
-      fi
-      ;;
-  esac
+  local repo="${1:-}" topic="${2:-}"
+  if [ -z "$repo" ] && ! [ -r /dev/tty ]; then echo "usage: task [--here | --at <path>] <repo> [topic]   (try 'task help')"; return 1; fi
+  repo="$(_task_resolve_repo "$repo")" || { echo "task: no repo chosen."; return 1; }
   [ -z "$repo" ] && { echo "task: no repo."; return 1; }
 
   # pre-check GitHub auth (clone needs it) for a clear early error
