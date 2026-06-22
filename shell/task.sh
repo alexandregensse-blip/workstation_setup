@@ -1060,3 +1060,36 @@ _task_pick(){
     [ -n "$p" ] && printf '%s\n' "$p" || return 1
   else printf '%s\n' "$_TASK_SEL"; fi
 }
+
+# Bash completion for `task`. Registering an explicit spec is also what STOPS bash-completion's shipped
+# generic loader (/usr/share/bash-completion/completions/_task) from kicking in: that loader runs
+# `task --completion bash` and eval's the output (it targets the go-task binary). Since `task` is our
+# function, that errored noisily — with our own spec, bash never falls back to it.
+_task_complete(){
+  COMPREPLY=()
+  local cur prev cword sub
+  cur="${COMP_WORDS[COMP_CWORD]}"; prev="${COMP_WORDS[COMP_CWORD-1]}"; cword=$COMP_CWORD
+  sub="${COMP_WORDS[1]:-}"
+
+  if [ "$prev" = "--at" ]; then compopt -o dirnames 2>/dev/null; return 0; fi   # --at <path>
+  if [ "$cword" -le 1 ]; then
+    mapfile -t COMPREPLY < <(compgen -W "list cleanup resume open settings toolchain auth help --here --at" -- "$cur")
+    return 0
+  fi
+  case "$sub" in
+    cleanup)              # -f/-y, or an existing clone label to discard
+      local clones; clones="$(_task_all_clones 2>/dev/null | while IFS= read -r c; do _task_clone_label "$c"; done | tr '\n' ' ')"
+      mapfile -t COMPREPLY < <(compgen -W "-f -y $clones" -- "$cur") ;;
+    open)     compopt -o dirnames 2>/dev/null ;;                                # open <clone-dir>
+    toolchain|toolchains)
+      mapfile -t COMPREPLY < <(compgen -W "$(_task_toolchain_list 2>/dev/null | tr '\n' ' ')" -- "$cur") ;;
+    auth)
+      if [ "$cword" -eq 2 ]; then
+        mapfile -t COMPREPLY < <(compgen -W "rm $(_task_slot_list 2>/dev/null | tr '\n' ' ')" -- "$cur")
+      elif [ "${COMP_WORDS[2]:-}" = "rm" ]; then
+        mapfile -t COMPREPLY < <(compgen -W "$(_task_slot_list 2>/dev/null | tr '\n' ' ')" -- "$cur")
+      fi ;;
+  esac
+  return 0
+}
+complete -F _task_complete task
