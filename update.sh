@@ -37,14 +37,20 @@ WS_DIR="${WS_DIR:-$WS_HOME/.workstation}"
 
 log(){  printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
 dock(){ if docker info >/dev/null 2>&1; then docker "$@"; else sudo docker "$@"; fi; }
-# Quiet build: capture docker's step-by-step output + the legacy-builder deprecation warning into a
-# log and only surface it if the build FAILS. (We do NOT force DOCKER_BUILDKIT — buildx may be absent,
-# which would error; the legacy builder is fine, just noisy, so we hide its output on success.)
+# Shared live build meter (defined once WS_DIR is known, below) — sourced for a one-line progress
+# display during rebuilds instead of a silent wait.
+# Quiet build with a LIVE one-line meter (step · ↓downloaded · rate · elapsed): docker's full
+# step-by-step output is captured to a log and only surfaced if the build FAILS. (We do NOT force
+# DOCKER_BUILDKIT — buildx may be absent, which would error; the legacy builder is fine, just noisy.)
 qbuild(){ local log rc=0; log="$(mktemp)"
-  dock build "$@" >"$log" 2>&1 || rc=$?
+  dock build "$@" >"$log" 2>&1 &
+  if declare -F _ws_build_meter >/dev/null 2>&1; then _ws_build_meter "$log" "$!" "  " || rc=$?
+  else wait "$!" || rc=$?; fi
   [ "$rc" != 0 ] && { echo "  ✗ build failed — last lines:"; tail -30 "$log"; }
   rm -f "$log"; return "$rc"; }
 [ -d "$WS_DIR/.git" ] || { echo "update: no workstation clone at $WS_DIR (pass --dir)"; exit 1; }
+# shellcheck source=/dev/null
+source "$WS_DIR/shell/build-progress.sh" 2>/dev/null || true   # live meter for qbuild (harmless if absent)
 
 # Pull quietly — git's enumerate/unpack/diffstat noise isn't useful here; we summarize instead.
 before="$(git -C "$WS_DIR" rev-parse HEAD 2>/dev/null || echo '')"
@@ -63,7 +69,7 @@ while IFS= read -r f; do [ -z "$f" ] && continue
   case "$f" in
     Dockerfile.base)            needs_base=1 ;;                          # toolchain layer
     Dockerfile|claude/*|dev/*)  needs_thin=1 ;;                          # config layer
-    shell/task.sh)              task_changed=1 ;;                        # shell function (no rebuild)
+    shell/*)                    task_changed=1 ;;                        # shell function + its helpers (no rebuild)
   esac
 done <<< "$changed"
 dock image inspect workstation-base >/dev/null 2>&1 || needs_base=1      # missing → must build

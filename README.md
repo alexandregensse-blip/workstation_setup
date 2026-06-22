@@ -299,7 +299,8 @@ A repo that needs extra tools gets a third, **per-repo** layer **`workstation-<o
 
 Pulls the repo and rebuilds **only what changed** — the base if `Dockerfile.base` moved, the thin
 image if config moved, or **nothing** if only docs/scripts changed (no rebuild for nothing). Builds
-are **quiet** — docker's step-by-step output is hidden and only shown if a build fails.
+show a **live one-line meter** (current step · downloaded · rate · elapsed); docker's full
+step-by-step output is hidden and only shown if a build fails.
 `--fresh` forces a from-scratch base (`--pull --no-cache`) to fetch
 the latest Claude/Serena/rtk. The trailing `&& source ~/.bashrc` reloads `task` in your current
 shell if it changed — running the script is a child process, so it can't do that by itself.

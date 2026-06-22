@@ -16,6 +16,11 @@
 # Clones on the HOST (WIP survives the disposable container). Auth: gh token via env + Claude
 # credentials from <workstation>/.claude-slots/<login>. Docker auto-falls back to sudo if needed. No hardcoded paths.
 
+# Shared build-progress meter (live one-liner for the toolchain build). Sourced from the clone next
+# to this file; harmless if absent (the build just stays quiet until done/fail).
+# shellcheck source=/dev/null
+source "$(dirname "${BASH_SOURCE[0]}")/build-progress.sh" 2>/dev/null || true
+
 _task_base(){ printf '%s' "${WORKSTATION_RUNNING:-${WORKSTATION_HOME:-$HOME/dev}/running}"; }
 _task_wsdir(){ printf '%s' "${WORKSTATION_DIR:-${WORKSTATION_HOME:-$HOME/dev}/.workstation}"; }
 _task_dock(){ if docker info >/dev/null 2>&1; then echo docker; else echo "sudo docker"; fi; }
@@ -689,22 +694,37 @@ _task_ensure_repo_image(){
   [ -f "$df" ] || { printf 'workstation'; return 0; }        # no spec → shared image
   _task_image_fresh "$key" && { printf '%s' "$img"; return 0; }
 
-  # Need a (re)build. Serialize: first to grab the lock builds; the others wait, then reuse.
-  local waited=0
-  until _task_build_lock_acquire "$key"; do
-    _task_image_fresh "$key" && { printf '%s' "$img"; return 0; }            # someone else finished it
-    [ "$waited" = 0 ] && echo "task: another build of '$img' is running — waiting…" >&2
-    waited=1; sleep 3
+  # Need a (re)build. Serialize: first to grab the lock builds; the others WAIT then reuse. While
+  # waiting, animate a single in-place line (cycling dots + elapsed) so it's clearly alive, not stuck,
+  # without spamming. Re-check freshness ~every 3s (cheap acquire attempt every 0.5s for responsiveness).
+  local t0=$SECONDS dots=0 n=0 anim=0 f
+  { true >/dev/tty; } 2>/dev/null && [ -t 2 ] && anim=1
+  [ "$anim" = 1 ] && printf '\033[?25l' >&2
+  while ! _task_build_lock_acquire "$key"; do
+    if [ $(( n % 6 )) -eq 0 ] && _task_image_fresh "$key"; then                # someone else finished it
+      [ "$anim" = 1 ] && printf '\r\033[K\033[?25h' >&2; printf '%s' "$img"; return 0
+    fi
+    if [ "$anim" = 1 ]; then
+      case $(( dots % 4 )) in 0) f="   " ;; 1) f=".  " ;; 2) f=".. " ;; 3) f="..." ;; esac
+      printf '\r\033[K\033[2mtask: another build of %s in progress%s  (%ss)\033[0m' "$img" "$f" "$(( SECONDS - t0 ))" >&2
+      dots=$(( dots + 1 )); n=$(( n + 1 )); sleep 0.5
+    else
+      [ "$n" = 0 ] && echo "task: another build of '$img' is running — waiting…" >&2
+      n=$(( n + 1 )); sleep 3
+    fi
   done
+  [ "$anim" = 1 ] && printf '\r\033[K\033[?25h' >&2
   if _task_image_fresh "$key"; then _task_build_lock_release "$key"; printf '%s' "$img"; return 0; fi
 
   echo "task: building repo toolchain image '$img' (first run / spec or base changed)…" >&2
   local log rc=0 baseid fromline=""; log="$(mktemp)"
   baseid="$($dock image inspect -f '{{.Id}}' workstation 2>/dev/null || true)"
   grep -qiE '^[[:space:]]*FROM[[:space:]]' "$df" || fromline="FROM workstation"
-  if { [ -n "$fromline" ] && echo "$fromline"; cat "$df"; } | $dock build -t "$img" -f - "$tdir" >"$log" 2>&1; then
-    printf '%s' "$baseid" > "$stamp"
-  else rc=1; echo "task: toolchain image build FAILED for '$img' — last lines:" >&2; tail -25 "$log" >&2; fi
+  { [ -n "$fromline" ] && echo "$fromline"; cat "$df"; } | $dock build -t "$img" -f - "$tdir" >"$log" 2>&1 &
+  if declare -F _ws_build_meter >/dev/null 2>&1; then _ws_build_meter "$log" "$!" "  building $img · " || rc=$?
+  else wait "$!" || rc=$?; fi
+  if [ "$rc" = 0 ]; then printf '%s' "$baseid" > "$stamp"
+  else echo "task: toolchain image build FAILED for '$img' — last lines:" >&2; tail -25 "$log" >&2; fi
   rm -f "$log"; _task_build_lock_release "$key"
   [ "$rc" = 0 ] && printf '%s' "$img"; return "$rc"
 }

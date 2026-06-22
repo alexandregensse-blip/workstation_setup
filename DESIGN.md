@@ -35,6 +35,7 @@ self-contained `<workspace>/.workstation` dir** — the host is left in its init
 | `Dockerfile` | The thin **`workstation`** image (`FROM workstation-base`) — bakes config/hooks; rebuilt on changes. |
 | `<ws>/toolchains/<key>/Dockerfile` | Optional **per-repo** toolchains (host-side, not committed) → image `workstation-<key>` (`FROM workstation`). Built on demand by `task toolchain` / the next task (see §7). |
 | `shell/task.sh` | The `task` shell function, **sourced straight from the clone**. |
+| `shell/build-progress.sh` | Shared live build meter (`_ws_build_meter`), sourced by `task.sh` + `update.sh`. |
 | `.github/workflows/shellcheck.yml` | CI lint (shellcheck) over the shell scripts; signal-only. |
 | `claude/CLAUDE.md` | Global code-exploration policy (Serena). Baked into the image at `~/.claude/CLAUDE.md`. |
 | `claude/settings.json` | Claude prefs **+ hooks** (Serena + rtk). Baked into the image. No hardcoded language. |
@@ -209,7 +210,10 @@ cached**: `_task_ensure_repo_image` rebuilds only when the image is missing, the
 self-heals every overlay on its next task. Concurrent launches for the same repo (e.g. resuming two
 of its tasks at once) are serialized by a **pure-bash build lock** (the same `ln` hard-link mutex as
 the login reservation, markers in `toolchains/.locks/`, stale-stolen after 1h) — the first builds,
-the rest **wait then reuse**, so the heavy toolchain is never built twice in parallel.
+the rest **wait then reuse** (with an animated, in-place "in progress… (Xs)" line so it's clearly
+alive, not stuck), so the heavy toolchain is never built twice in parallel. The build itself shows a
+**live one-line meter** (step · ↓downloaded · rate · elapsed, via the shared `_ws_build_meter`); the
+full docker log is hidden unless the build fails.
 `task toolchain` opens an **interactive menu** (like
 `settings`: arrow keys) to **add / edit / remove** specs — each row shows whether its image is built;
 `task toolchain <repo>` jumps straight to scaffolding/editing one. `uninstall.sh` removes all
