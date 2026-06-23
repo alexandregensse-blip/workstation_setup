@@ -163,17 +163,25 @@ _task_newtab(){
 # nothing was chosen / aborted.
 _task_menu(){
   _TASK_PICKED=(); _TASK_PICKED_IDX=()
+  # Optional locked rows: a caller sets _TASK_MENU_DISABLED[i]=1 for items that can't be picked (e.g. a
+  # running task in 'resume'). Consume it up-front (snapshot + clear) so it never leaks into a later menu.
+  local -a dis_in=("${_TASK_MENU_DISABLED[@]}"); _TASK_MENU_DISABLED=()
   { true >/dev/tty; } 2>/dev/null || return 2
   local -a items=("$@"); local n=${#items[@]}
   [ "$n" -gt 0 ] || return 1
-  local -a sel; local j box key rest
-  for ((j=0; j<n; j++)); do sel[j]=0; done
+  local -a sel dis; local j box key rest
+  for ((j=0; j<n; j++)); do sel[j]=0; dis[j]="${dis_in[j]:-0}"; done
   local cur=0 total=$((n+2)) confirm=$n cancel=$((n+1)) drawn=0
   printf '\n  \033[1mReprendre quelle(s) task ?\033[0m\n  \033[2m↑/↓ déplacer · Espace/Entrée cocher · « Confirmer » pour valider · q/Échap annuler\033[0m\n' > /dev/tty
   printf '\033[?25l' > /dev/tty                                    # hide cursor
   while :; do
     [ "$drawn" -gt 0 ] && printf '\033[%dA' "$drawn" > /dev/tty   # back to first row, redraw in place
     for ((j=0; j<n; j++)); do
+      if [ "${dis[j]}" = 1 ]; then                                  # locked row (e.g. running) — dimmed, no checkbox
+        if [ "$j" = "$cur" ]; then printf '\033[K\033[7m\033[2m  ● %s \033[0m\n' "${items[j]}" > /dev/tty
+        else                       printf '\033[K\033[2m  ● %s\033[0m\n'         "${items[j]}" > /dev/tty; fi
+        continue
+      fi
       [ "${sel[j]}" = 1 ] && box=$'[\033[32m✓\033[0m]' || box='[ ]'
       if [ "$j" = "$cur" ]; then printf '\033[K\033[7m %b %s \033[0m\n' "$box" "${items[j]}" > /dev/tty
       else                       printf '\033[K %b %s\n'             "$box" "${items[j]}" > /dev/tty; fi
@@ -194,10 +202,10 @@ _task_menu(){
         esac ;;
       k|K) cur=$(( (cur-1+total)%total )) ;;
       j|J) cur=$(( (cur+1)%total )) ;;
-      a|A) for ((j=0; j<n; j++)); do sel[j]=1; done ;;
+      a|A) for ((j=0; j<n; j++)); do [ "${dis[j]}" = 1 ] || sel[j]=1; done ;;
       q|Q) printf '\033[?25h\n' > /dev/tty; return 1 ;;
       ' '|''|$'\n'|$'\r')
-        if   [ "$cur" -lt "$n" ];     then sel[cur]=$(( 1 - sel[cur] ))
+        if   [ "$cur" -lt "$n" ];     then [ "${dis[cur]}" = 1 ] || sel[cur]=$(( 1 - sel[cur] ))
         elif [ "$cur" = "$confirm" ]; then break
         else printf '\033[?25h\n' > /dev/tty; return 1; fi ;;
     esac
@@ -243,7 +251,17 @@ _task_select(){
 _task_resume(){
   local -a clones; mapfile -t clones < <(_task_all_clones)
   [ "${#clones[@]}" -gt 0 ] || { echo "task: no task clones to resume."; return 0; }
-  local -a labels=(); local c; for c in "${clones[@]}"; do labels+=("$(_task_clone_label "$c")"); done
+  # A clone live in a container right now is already open — mark it running and LOCK it (can't re-open;
+  # exit that task first). Same running-detection as 'list'/'cleanup', so they never disagree.
+  local -A running=(); local src
+  while IFS='|' read -r src _; do [ -n "$src" ] && running["$src"]=1; done < <(_task_running_pairs)
+  local -a labels=(); local c idx=0 free=0; _TASK_MENU_DISABLED=()
+  for c in "${clones[@]}"; do
+    if [ -n "${running[$c]+x}" ]; then labels+=("$(_task_clone_label "$c")   — running, exit it first"); _TASK_MENU_DISABLED[idx]=1
+    else                               labels+=("$(_task_clone_label "$c")");                            _TASK_MENU_DISABLED[idx]=0; free=$((free+1)); fi
+    idx=$((idx+1))
+  done
+  [ "$free" -gt 0 ] || { echo "task: all task clones are already running — exit one to resume it."; return 0; }
   _task_menu "${labels[@]}"; local rc=$?
   [ "$rc" = 2 ] && { echo "task: no TTY to choose."; return 1; }
   [ "$rc" = 0 ] || { echo "task: cancelled."; return 0; }
