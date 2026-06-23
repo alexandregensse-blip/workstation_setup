@@ -993,6 +993,10 @@ _task_run(){
       [ -f /seed/statusline.sh ] && cp -a /seed/statusline.sh "$CFG/statusline.sh"
       cfg="$CFG/.claude.json"; [ -f "$cfg" ] || printf "{}" > "$cfg"
       [ -f /seed/claude-keys.json ] && { jq -s ".[0] * .[1]" "$cfg" /seed/claude-keys.json > /tmp/c1 2>/dev/null && mv /tmp/c1 "$cfg"; }
+      # MCP servers (Serena, …) are registered in the baked image ~/.claude.json, but a login slot brings
+      # its OWN .claude.json with no mcpServers → merge the baked mcpServers in so Serena stays wired in
+      # login mode too (headless mode already reads the baked ~/.claude.json directly). Slot keys win.
+      [ -f /home/dev/.claude.json ] && { jq -s ".[0] + {mcpServers: ((.[1].mcpServers // {}) + (.[0].mcpServers // {}))}" "$cfg" /home/dev/.claude.json > /tmp/cmcp 2>/dev/null && mv /tmp/cmcp "$cfg"; }
       jq ".projects[\"/work\"] += {hasTrustDialogAccepted:true, hasCompletedProjectOnboarding:true}" "$cfg" > /tmp/c2 2>/dev/null && mv /tmp/c2 "$cfg"
       [ "${WS_RESUME:-0}" = 1 ] && compgen -G "$CFG/projects/*/*.jsonl" >/dev/null 2>&1 && set -- --continue "$@"
       S="$(jq -cn --arg n "$WS_NOTIFY" --arg l "$WS_LANG" --arg t "$WS_THEME" --arg s "$WS_SL" --arg m "$WS_MEMDIR" "{}
