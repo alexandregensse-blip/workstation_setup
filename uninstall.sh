@@ -68,6 +68,14 @@ if [ -f "$HOME/.bashrc" ] && grep -q '# >>> workstation >>>' "$HOME/.bashrc"; th
   else echo "  kept"; note_kept "'task' block in ~/.bashrc"; fi
 fi
 
+# 1b. WhatsApp bridge container (a shared, runtime-only singleton) — stop it so its image can be removed
+# below and nothing keeps holding the session. Its image 'workstation-whatsapp' is a derived image, so
+# it's offered for removal by the loop just below; its data lives under $WS_DIR (removed at the end).
+if dock ps -aq -f "name=^/ws-whatsapp-bridge$" 2>/dev/null | grep -q .; then
+  log "WhatsApp bridge container"
+  dock rm -f ws-whatsapp-bridge >/dev/null 2>&1 && { echo "  stopped & removed"; note_removed "WhatsApp bridge container"; }
+fi
+
 # 2. Docker images: per-repo toolchain overlays (workstation-<key>), then the thin image + base.
 derived="$(dock images --format '{{.Repository}}' 2>/dev/null | grep -E '^workstation-' | grep -vx 'workstation-base' | sort -u || true)"
 for img in $derived; do

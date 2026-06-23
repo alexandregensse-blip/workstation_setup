@@ -16,6 +16,8 @@
 /.memory/
 /toolchains/
 /gh/
+/.auth/
+/.daemon/
 
 # Safety net: never commit credentials / secrets.
 .credentials.json

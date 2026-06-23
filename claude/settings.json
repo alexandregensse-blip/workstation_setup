@@ -15,12 +15,18 @@
     "SessionStart": [
       { "matcher": "", "hooks": [ { "type": "command", "command": "serena-hooks activate" } ] }
     ],
+    "UserPromptSubmit": [
+      { "matcher": "", "hooks": [ { "type": "command", "command": "/home/dev/.local/bin/wa-presence" } ] }
+    ],
     "PreToolUse": [
       { "matcher": "", "hooks": [
         { "type": "command", "command": "serena-hooks remind" },
         { "type": "command", "command": "serena-hooks auto-approve" }
       ] },
       { "matcher": "Bash", "hooks": [ { "type": "command", "command": "rtk hook claude" } ] }
+    ],
+    "Notification": [
+      { "matcher": "", "hooks": [ { "type": "command", "command": "/home/dev/.local/bin/wa-notify" } ] }
     ],
     "SessionEnd": [
       { "matcher": "", "hooks": [ { "type": "command", "command": "serena-hooks cleanup" } ] }

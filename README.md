@@ -104,7 +104,7 @@ environment stays clean). They take effect on the next task, no rebuild:
 | Feature | Effect |
 |---|---|
 | `memory` | persist Claude's auto-memory across future tasks: `repo` (default — keyed by `<owner>-<repo>` so same-named repos from different owners stay separate), `global` (all repos), `off` (per-task). Stored in `.workstation/.memory/` |
-| `notify` | `terminal_bell` → bell + flash when Claude is done / needs you (native; via `claude --settings`) |
+| `notify` | comma-separated channels: `terminal_bell` (local bell + flash, native), `whatsapp` (ping a dedicated group on your phone when a task needs you and you've been away ≥5 min), or both (`terminal_bell,whatsapp`). See [WhatsApp notifications](#whatsapp-notifications) |
 | `lang` | Claude UI language code (e.g. `fr`) |
 | `theme` | `dark` / `light` / … |
 | `statusline` | `off` to disable the status line |
@@ -161,7 +161,28 @@ task cleanup fix-login -f   # or target one by name
 
 **Get notified when Claude finishes / needs you** (terminal bell + window flash):
 ```bash
-task settings       # set  notify = terminal_bell
+task settings       # set  notify = terminal_bell   (or  whatsapp,  or  terminal_bell,whatsapp)
+```
+
+#### WhatsApp notifications
+
+Set `notify` to include `whatsapp` (in `task settings`, pick *whatsapp* or *both*) and a task will message
+a **dedicated WhatsApp group on your phone** when it needs you — *but only if you've been away ≥ 5 minutes*,
+so you're not pinged while you're actively working. The first time you enable it, you scan a QR once to link
+your WhatsApp; you pick the destination group (e.g. a "Claude Tasks" group with just you in it). That's the
+only manual step — re-linking is asked for automatically (~every 20 days) at the next task launch.
+
+How it works (all self-contained, container-only):
+- A single shared container `ws-whatsapp-bridge` holds your WhatsApp session (Baileys / WhatsApp Web). It's
+  **started when the first WhatsApp task launches and stopped when the last one exits** (reference-counted).
+- Tasks never talk to it over the network and never hold WhatsApp credentials: the in-container hooks just
+  **drop a small file** into a shared outbox (`.workstation/.daemon/whatsapp/`), and the bridge relays it.
+- The session lives in `.workstation/.auth/whatsapp/` — **separate from your Claude logins**.
+- "Away" is **machine-wide**: interacting with any WhatsApp task resets the 5-min timer. Override the delay
+  with `WORKSTATION_WHATSAPP_IDLE=<seconds>`.
+
+```bash
+task settings       # set  notify = whatsapp   → scan the QR, pick your "Claude Tasks" group
 ```
 
 **Always launch Claude a certain way** (no per-task flags):

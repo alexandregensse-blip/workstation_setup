@@ -92,7 +92,7 @@ task — isolated Claude sessions in disposable containers.
   task help                                    This help.
 
 Features are configured with 'task settings' (stored in <ws>/.config, not host env). They apply to
-the next task with no rebuild: notifications (terminal bell), language, theme, status line, per-repo
+the next task with no rebuild: notifications (terminal bell and/or WhatsApp), language, theme, status line, per-repo
 memory persistence, reliable DNS, container resource limits (cpus / ram), and Claude launch defaults
 (permission-mode / model / effort — the container is the sandbox, so 'auto' is reasonable). Each also
 takes a one-off env override (WORKSTATION_NOTIFY, WORKSTATION_CLAUDE_MODE, …) never written to your shell.
@@ -383,7 +383,7 @@ _task_setting_keys(){ printf '%s\n' notify memory lang theme statusline dns cpus
 
 # One-line hint shown for a setting (allowed values / format + what "clear" means).
 _task_setting_hint(){ case "$1" in
-  notify)        echo 'terminal_bell (bell+flash when Claude is done/needs you) · clear = off' ;;
+  notify)        echo 'terminal_bell (local bell+flash) · whatsapp (ping a dedicated group on your phone) · both = "terminal_bell,whatsapp" · clear = off' ;;
   memory)        echo 'repo (per-repo, default) · global (all repos) · off (per task)' ;;
   lang)          echo 'Claude UI language code, e.g. fr / en / pt-BR · clear = Claude default' ;;
   theme)         echo 'dark · light · dark-daltonized · light-daltonized · clear = default' ;;
@@ -401,7 +401,7 @@ esac; }
 _task_setting_validate(){
   local k="$1" v="$2" t; _TASK_SETTING_ERR=""
   case "$k" in
-    notify)        case "$v" in terminal_bell) return 0 ;; *) _TASK_SETTING_ERR="notify must be 'terminal_bell' (or clear with \"-\" to turn off)";; esac ;;
+    notify)        case "$v" in terminal_bell|whatsapp|terminal_bell,whatsapp|whatsapp,terminal_bell) return 0 ;; *) _TASK_SETTING_ERR="notify: terminal_bell | whatsapp | terminal_bell,whatsapp (clear with \"-\")";; esac ;;
     memory)        case "$v" in repo|global|off) return 0 ;; *) _TASK_SETTING_ERR="memory must be: repo | global | off";; esac ;;
     statusline)    case "$v" in off) return 0 ;; *) _TASK_SETTING_ERR="statusline only takes 'off' (clear with \"-\" to re-enable)";; esac ;;
     claude_mode)   case "$v" in auto|acceptEdits|bypassPermissions|default) return 0 ;; *) _TASK_SETTING_ERR="mode must be: auto | acceptEdits | bypassPermissions | default";; esac ;;
@@ -426,7 +426,7 @@ _task_setting_show(){ local v; v="$(_task_cfg "$1")"
 # Pickable value choices for a setting, one per line as "<stored-value>|<label>" (empty value =
 # clear/default). Returns 1 for free-form settings (lang/model/dns), which are typed instead.
 _task_setting_choices(){ case "$1" in
-  notify)        printf '%s\n' 'terminal_bell|terminal_bell — bell + flash when Claude is done / needs you' '|off — no notification' ;;
+  notify)        printf '%s\n' 'terminal_bell|terminal_bell — local bell + flash' 'whatsapp|whatsapp — ping a dedicated group on your phone' 'terminal_bell,whatsapp|both — local bell + WhatsApp' '|off — no notification' ;;
   memory)        printf '%s\n' 'repo|repo — per-repo memory (default)' 'global|global — shared across all repos' 'off|off — ephemeral, per task' ;;
   statusline)    printf '%s\n' '|default — keep the status line' 'off|off — hide it' ;;
   theme)         printf '%s\n' 'dark|dark' 'light|light' 'dark-daltonized|dark-daltonized' 'light-daltonized|light-daltonized' '|— unset (default)' ;;
@@ -445,6 +445,12 @@ _task_setting_edit(){
     _task_select "Set '$k'" "${labels[@]}" || return 0          # cancelled → leave unchanged
     _task_cfg_set "$k" "${vals[$_TASK_SEL_IDX]}"
     [ -n "${vals[$_TASK_SEL_IDX]}" ] && echo "  ✓ $k = ${vals[$_TASK_SEL_IDX]}" || echo "  ✓ $k cleared (default)"
+    # Turning WhatsApp on here → link the phone right away (one-time QR + group pick), so the next task
+    # is ready. Already-linked → just confirm. Never errors out of the settings menu.
+    if [ "$k" = notify ]; then case ",${vals[$_TASK_SEL_IDX]}," in *,whatsapp,*)
+      if _ws_wa_ready; then echo "  ✓ WhatsApp already linked (group set)."
+      else echo "  Enabling WhatsApp — let's link your phone now:"; _ws_wa_onboard || echo "  (you can link it later from 'task settings')"; fi ;;
+    esac; fi
     return 0
   fi
   # free-form: typed value with validation (Enter=keep · "-"=clear)
@@ -772,6 +778,119 @@ _task_ensure_repo_image(){
   [ "$rc" = 0 ] && printf '%s' "$img"; return "$rc"
 }
 
+# --- WhatsApp task notifier (optional 'notify' channel) -----------------------------------------------
+# When 'notify' includes 'whatsapp', a task drops a JSON file into a shared host outbox whenever it needs
+# you AND you've been away ≥5 min (the in-container hooks wa-presence/wa-notify do that). A SINGLE shared
+# host-side container, 'ws-whatsapp-bridge', holds your WhatsApp session and relays those files to a
+# dedicated group. It's started when the first WhatsApp task launches and stopped when the last one ends
+# (reference-counted with the same lock-free hard-link idiom as the login slots). The session/creds live
+# in <ws>/.auth/whatsapp (separate from Claude tokens); nothing WhatsApp ever enters a task container.
+_ws_wa_dir(){  printf '%s' "$(_task_wsdir)/.daemon/whatsapp"; }   # outbox/, refs/, presence, lock
+_ws_wa_auth(){ printf '%s' "$(_task_wsdir)/.auth/whatsapp"; }     # auth/ (session), config.json, groups.tsv
+_ws_wa_image="workstation-whatsapp"
+_ws_wa_container="ws-whatsapp-bridge"
+
+# Is 'whatsapp' one of the (comma-separated) notify channels?
+_ws_wa_on(){ case ",$(_task_cfg notify)," in *,whatsapp,*) return 0 ;; *) return 1 ;; esac; }
+
+# Build the bridge image on demand (context = the whatsapp/ dir only, so the rest of the repo and the
+# .auth/.daemon dirs are never sent as build context). Echoes the image name; 1 on failure.
+_ws_wa_ensure_image(){
+  local dock img ws; dock="$(_task_dock)"; img="$_ws_wa_image"; ws="$(_task_wsdir)"
+  $dock image inspect "$img" >/dev/null 2>&1 && { printf '%s' "$img"; return 0; }
+  [ -f "$ws/whatsapp/Dockerfile" ] || { echo "task: whatsapp/Dockerfile missing." >&2; return 1; }
+  echo "task: building the WhatsApp bridge image '$img' (first use)…" >&2
+  if $dock build -t "$img" "$ws/whatsapp" >&2; then printf '%s' "$img"; return 0
+  else echo "task: WhatsApp bridge image build FAILED." >&2; return 1; fi
+}
+
+# Serialize bridge start/stop + refcount reconcile (same lock-free mutex as the build/login locks: a
+# hard-link onto a stamped temp; a >30s-old lock is stolen so we never wedge).
+_ws_wa_lock(){ local l tmp at now i; l="$(_ws_wa_dir)/.bridge.lock"; tmp="$l.$BASHPID"; mkdir -p "$(_ws_wa_dir)"
+  printf '%(%s)T' -1 > "$tmp" 2>/dev/null || return 1
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    if ln "$tmp" "$l" 2>/dev/null; then rm -f "$tmp"; return 0; fi
+    at="$(<"$l" 2>/dev/null)"; printf -v now '%(%s)T' -1
+    case "$at" in ''|*[!0-9]*) : ;; *) [ $(( now - at )) -ge 30 ] && rm -f "$l" 2>/dev/null ;; esac
+    sleep 0.2
+  done; rm -f "$tmp"; return 1; }
+_ws_wa_unlock(){ rm -f "$(_ws_wa_dir)/.bridge.lock" 2>/dev/null; }
+
+_ws_wa_bridge_running(){ local dock; dock="$(_task_dock)"; [ -n "$($dock ps -q -f "name=^/${_ws_wa_container}$" 2>/dev/null)" ]; }
+# Start the singleton bridge if it isn't already up (idempotent; call under the lock).
+_ws_wa_bridge_up(){ local dock auth img; dock="$(_task_dock)"
+  _ws_wa_bridge_running && return 0
+  auth="$(_ws_wa_auth)"; mkdir -p "$auth/auth" "$(_ws_wa_dir)/outbox"
+  img="$(_ws_wa_ensure_image)" || return 1
+  $dock rm -f "$_ws_wa_container" >/dev/null 2>&1 || true
+  $dock run -d --name "$_ws_wa_container" \
+    -v "$auth:/data" -v "$(_ws_wa_dir)/outbox:/outbox" \
+    "$img" run >/dev/null 2>&1; }
+_ws_wa_bridge_down(){ local dock; dock="$(_task_dock)"; $dock rm -f "$_ws_wa_container" >/dev/null 2>&1 || true; }
+
+# Drop refs whose task container is gone (a crashed task that never released). A just-created ref (its
+# container not yet started) is kept for a 90s grace so a concurrent release can't prune it mid-launch.
+_ws_wa_reconcile(){ local refs dock live r name at now; refs="$(_ws_wa_dir)/refs"; [ -d "$refs" ] || return 0
+  dock="$(_task_dock)"; live="$($dock ps --format '{{.Names}}' 2>/dev/null)"
+  printf -v now '%(%s)T' -1
+  for r in "$refs"/*; do [ -e "$r" ] || continue; name="$(basename "$r")"
+    printf '%s\n' "$live" | grep -qxF "$name" && continue          # container alive → keep
+    at="$(<"$r" 2>/dev/null)"; case "$at" in ''|*[!0-9]*) at=0 ;; esac
+    [ $(( now - at )) -ge 90 ] && rm -f "$r" 2>/dev/null            # gone and past grace → prune
+  done; }
+
+# Refcount a task in ($1 = its container name) / out, starting/stopping the shared bridge at the edges.
+_ws_wa_acquire(){ local refs; refs="$(_ws_wa_dir)/refs"
+  _ws_wa_lock || return 0
+  mkdir -p "$refs"; printf '%(%s)T' -1 > "$refs/$1" 2>/dev/null
+  _ws_wa_bridge_up || echo "task: could not start the WhatsApp bridge (pings may be delayed)." >&2
+  _ws_wa_unlock; }
+_ws_wa_release(){ local refs n r; refs="$(_ws_wa_dir)/refs"
+  _ws_wa_lock || return 0
+  rm -f "$refs/$1" 2>/dev/null
+  _ws_wa_reconcile
+  n=0; [ -d "$refs" ] && for r in "$refs"/*; do [ -e "$r" ] && n=$((n+1)); done
+  [ "$n" -eq 0 ] && _ws_wa_bridge_down
+  _ws_wa_unlock; }
+
+# Is the WhatsApp session ready to use? (linked, a group chosen, and not flagged for re-link.)
+_ws_wa_ready(){ local a; a="$(_ws_wa_auth)"
+  [ -f "$a/auth/creds.json" ] && [ -f "$a/config.json" ] && [ ! -f "$a/needs-relink" ]; }
+
+# Pick the destination group from the list the bridge dumped at login → write config.json (pure-bash
+# JSON: the group jid has no characters needing escaping). 1 if no group / cancelled.
+_ws_wa_pick_group(){
+  local a tsv jid name; a="$(_ws_wa_auth)"; tsv="$a/groups.tsv"
+  [ -s "$tsv" ] || { echo "  no WhatsApp groups found — create a group (e.g. « Claude Tasks ») on your phone, then retry." > /dev/tty; return 1; }
+  local -a jids=() labels=()
+  while IFS=$'\t' read -r jid name; do [ -n "$jid" ] && { jids+=("$jid"); labels+=("${name:-$jid}"); }; done < "$tsv"
+  [ "${#jids[@]}" -gt 0 ] || { echo "  no WhatsApp groups found — create one and retry." > /dev/tty; return 1; }
+  _task_select "Which WhatsApp group for task notifications?" "${labels[@]}" || return 1
+  jid="${jids[$_TASK_SEL_IDX]}"
+  printf '{"group":"%s"}\n' "$jid" > "$a/config.json"
+  echo "  ✓ WhatsApp group: ${labels[$_TASK_SEL_IDX]}" > /dev/tty
+}
+
+# Interactive one-time onboarding: build the image, run the bridge in 'login' mode (QR scan), then pick
+# the group. Needs a TTY (a QR to scan). Idempotent-ish: safe to call whenever the session isn't ready.
+_ws_wa_onboard(){
+  { true >/dev/tty; } 2>/dev/null || { echo "task: WhatsApp needs a terminal to scan the QR — run 'task settings' to link it." >&2; return 1; }
+  local dock auth img; dock="$(_task_dock)"; auth="$(_ws_wa_auth)"; mkdir -p "$auth/auth"
+  img="$(_ws_wa_ensure_image)" || return 1
+  echo "  Link WhatsApp: open WhatsApp → Settings → Linked devices → Link a device, then scan:" > /dev/tty
+  $dock run -it --rm -v "$auth:/data" "$img" login < /dev/tty || { echo "  WhatsApp link cancelled/failed." > /dev/tty; return 1; }
+  [ -f "$auth/auth/creds.json" ] || { echo "  WhatsApp session not established — retry from 'task settings'." > /dev/tty; return 1; }
+  rm -f "$auth/needs-relink" 2>/dev/null
+  _ws_wa_pick_group
+}
+
+# Make sure WhatsApp is usable for a launching task: ready → ok; otherwise onboard if we have a TTY,
+# else signal "not ready" so the caller skips WhatsApp for this run (never blocks the task).
+_ws_wa_ensure_ready(){
+  _ws_wa_ready && return 0
+  { true >/dev/tty; } 2>/dev/null || return 1
+  _ws_wa_onboard && _ws_wa_ready; }
+
 # Run the container for an existing clone dir (auth + mounts + docker run). Used by start and 'open'.
 _task_run(){
   local dir="$1" resume="${3:-}"
@@ -819,8 +938,13 @@ _task_run(){
   # container (with the image's jq) — so the JSON is always well-formed even for ad-hoc env overrides,
   # and the host needs no jq. notify → preferredNotifChannel, lang → language, theme → theme,
   # statusline=off → statusLine:null, memory → autoMemoryDirectory (below).
-  local _notify _lang _theme _sl
-  _notify="$(_task_cfg notify)"; _lang="$(_task_cfg lang)"; _theme="$(_task_cfg theme)"; _sl="$(_task_cfg statusline)"
+  # 'notify' is now a comma-separated set of channels. 'terminal_bell' → Claude's native
+  # preferredNotifChannel (WS_NOTIFY, kept backward-compatible); 'whatsapp' → the WhatsApp notifier
+  # (handled separately below, via the in-container hooks + the shared bridge).
+  local _notify_raw _notify _lang _theme _sl _wa=0
+  _notify_raw="$(_task_cfg notify)"; _lang="$(_task_cfg lang)"; _theme="$(_task_cfg theme)"; _sl="$(_task_cfg statusline)"
+  _notify=""; case ",$_notify_raw," in *,terminal_bell,*) _notify=terminal_bell ;; esac
+  case ",$_notify_raw," in *,whatsapp,*) _wa=1 ;; esac
 
   # Persist Claude's auto-memory ACROSS future tasks (per-repo by design, but each task is a fresh
   # /work so it'd be lost). 'memory': repo (default — keyed by <owner>-<repo> from the clone's origin,
@@ -919,6 +1043,21 @@ _task_run(){
   # own DNS is flaky like a phone hotspot). Default: inherit the host resolver.
   local -a dns=() d; for d in $(_task_cfg dns); do dns+=(--dns "$d"); done
 
+  # WhatsApp notifier: if enabled, make sure the session is usable (onboard once on a TTY, else skip for
+  # this run — never block the task), then mount the shared host dir + flag it on, and refcount the
+  # shared bridge up. Only WhatsApp-enabled tasks get the mount/flag, so other tasks stay untouched.
+  local -a wa_args=()
+  if [ "$_wa" = 1 ]; then
+    if _ws_wa_ensure_ready; then
+      local _wadir; _wadir="$(_ws_wa_dir)"; mkdir -p "$_wadir/outbox" "$_wadir/refs"
+      _ws_wa_acquire "$_cname"
+      wa_args=(-v "$_wadir:/ws-whatsapp" -e WS_NOTIFY_WHATSAPP=1 -e "WS_WHATSAPP_IDLE=${WORKSTATION_WHATSAPP_IDLE:-300}")
+    else
+      echo "task: WhatsApp notify is on but the session isn't linked — WhatsApp pings disabled for this task (link it via 'task settings')." >&2
+      _wa=0
+    fi
+  fi
+
   $dock run -it --rm \
     --name "$_cname" \
     -v "$dir:/work" -w /work \
@@ -932,9 +1071,11 @@ _task_run(){
     "${session[@]}" \
     "${memmount[@]}" \
     "${resume_env[@]}" \
+    "${wa_args[@]}" \
     --memory="${_ram:-4g}" --cpus="${_cpus:-2}" \
     "$image" "${claude_cmd[@]}"
 
+  [ "$_wa" = 1 ] && _ws_wa_release "$_cname"   # refcount the shared bridge down (stops it when last out)
   [ -n "$slot" ] && rm -f "$(_task_resv_file "$slot")" 2>/dev/null   # free the login immediately on exit
   echo "↩  Container disposed. Clone (on host): $dir"
   echo "   When it's clean and pushed, 'task cleanup' will remove it."
