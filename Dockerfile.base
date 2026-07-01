@@ -32,7 +32,21 @@ RUN i=1; until curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/in
 # variants lack GNU features that scripts depend on — e.g. `grep --include`, `date +%s%N` — so
 # non-interactive scripts (gates, cascades) break (an interactive grep→ugrep alias doesn't help them,
 # scripts don't inherit shell functions). Install the real GNU tools (they win on PATH at /usr/bin).
+#
+# nodejs-20 lives here too, for Serena's language servers: Serena starts the Python LSP via
+# `uvx --from pyright==… pyright-langserver`, and pyright-python bundles its OWN Node (nodeenv) that
+# does NOT run on this Wolfi image (missing native libs → the LSP dies at `initialize`, so Serena
+# reports "Failed to start 1 language server(s): python"). pyright-python prefers a Node found on
+# PATH, so a system nodejs makes the Python LSP actually start — no bundled-node download, no egress
+# dependency. (TS/JS LSP also reuses this Node; Go still needs gopls where the Go toolchain lives.)
+#
 # Last layer on purpose: rebuilds reuse all the cached toolchain layers above.
 USER root
-RUN apk add --no-cache grep sed gawk coreutils findutils diffutils util-linux flock gzip patch procps
+RUN apk add --no-cache grep sed gawk coreutils findutils diffutils util-linux flock gzip patch procps \
+    nodejs-20
 USER dev
+
+# Pre-warm the exact pyright Serena pins (uv caches the wheel) so the Python LSP starts even with NO
+# network egress in the task container — belt-and-braces with the system Node above. Best-effort:
+# a transient download hiccup must never fail the whole base build (the system Node is the real fix).
+RUN uvx -p 3.13 --from pyright==1.1.403 pyright-langserver --version >/dev/null 2>&1 || true
