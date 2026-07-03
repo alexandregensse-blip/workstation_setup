@@ -85,6 +85,10 @@ else
                      || echo "Rebuilding base image (a few minutes)…"
     if [ "$FRESH" = 1 ]; then qbuild --pull --no-cache -f "$WS_DIR/Dockerfile.base" -t workstation-base "$WS_DIR" || exit 1
     else                      qbuild -f "$WS_DIR/Dockerfile.base" -t workstation-base "$WS_DIR" || exit 1; fi
+    # Record the Claude Code version now baked into the base, so `task`'s once-a-day version check is a
+    # cheap file read (no container spawn). Best-effort — a miss just makes the first task read it lazily.
+    ver="$(dock run --rm --entrypoint claude workstation-base --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+    [ -n "$ver" ] && printf '%s\n' "$ver" > "$WS_DIR/.claude-version"
   fi
   echo "Rebuilding workstation image (config)…"
   qbuild -t workstation "$WS_DIR" || exit 1

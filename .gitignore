@@ -11,6 +11,8 @@
 /.bases
 /.dl-base
 /.dl-image
+/.claude-version
+/.version-check
 /.claude/
 /.claude-slots/
 /.memory/

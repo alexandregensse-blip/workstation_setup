@@ -678,6 +678,7 @@ _task_list(){
   fi
   local -a authed; mapfile -t authed < <(_task_slot_list); local s
   if [ "${#authed[@]}" -gt 0 ]; then echo; echo "Logins:"; for s in "${authed[@]}"; do _task_slot_line "$s"; done; fi
+  _task_version_check                 # passive spot to surface a stale-image nudge (shared 24h throttle)
 }
 
 # Known MCP/tool artifacts to keep out of `git status`. We add these to the clone-LOCAL
@@ -910,10 +911,37 @@ _ws_wa_ensure_ready(){
   _ws_wa_onboard && _ws_wa_ready; }
 
 # Run the container for an existing clone dir (auth + mounts + docker run). Used by start and 'open'.
+# Once a day at most, nudge if the container's Claude Code is OLDER than the host's. A newer host CLI
+# knows newer model aliases (e.g. `sonnet` → the latest Sonnet), so the fix is a `update.sh --fresh`
+# rebuild of the base image. Deliberately cheap and non-blocking: the 24h throttle makes the hot path a
+# single stamp-file stat; the version numbers come from a file update.sh records (no container spawn);
+# and every failure mode returns silently, so a launch is never slowed or aborted by this check.
+_task_version_check(){
+  local ws stamp; ws="$(_task_wsdir)"; stamp="$ws/.version-check"
+  # Throttle: bail if checked within 24h. `find -mmin +1440` prints the path only when it's OLDER.
+  [ -f "$stamp" ] && [ -z "$(find "$stamp" -mmin +1440 2>/dev/null)" ] && return 0
+  : > "$stamp" 2>/dev/null || true                      # stamp up front so even a failed check waits 24h
+  command -v claude >/dev/null 2>&1 || return 0         # no host CLI → nothing to compare against
+  local host img dock; dock="$(_task_dock)"
+  host="$(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"; [ -n "$host" ] || return 0
+  img="$(cat "$ws/.claude-version" 2>/dev/null)"        # written by update.sh after each base build
+  if [ -z "$img" ]; then                                # image predates the record → read once, then cache
+    img="$($dock run --rm --entrypoint claude workstation-base --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+    [ -n "$img" ] && printf '%s\n' "$img" > "$ws/.claude-version" 2>/dev/null || true
+  fi
+  [ -n "$img" ] || return 0
+  [ "$host" = "$img" ] && return 0
+  # Nudge only when the host is STRICTLY newer (the larger version sorts last under -V).
+  [ "$(printf '%s\n%s\n' "$host" "$img" | sort -V | tail -1)" = "$host" ] || return 0
+  printf '\n\033[1;33m⚠ Claude Code : %s dans le conteneur · %s sur l'\''hôte.\033[0m\n' "$img" "$host"
+  printf '  Rebuild pour aligner les modèles (alias sonnet/opus…) :  \033[1m%s/update.sh --fresh\033[0m\n\n' "$ws"
+}
+
 _task_run(){
   local dir="$1" resume="${3:-}"
   [ -d "$dir" ] || { echo "task: no clone at $dir"; return 1; }
   local ws_dir dock; ws_dir="$(_task_wsdir)"; dock="$(_task_dock)"
+  _task_version_check                 # once/24h: nudge if the image's Claude is behind the host's
 
   local gh_token; gh_token="$(gh auth token 2>/dev/null || true)"
   [ -z "$gh_token" ] && { echo "task: not logged into GitHub — run 'gh auth login' first."; return 1; }
