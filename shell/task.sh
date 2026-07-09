@@ -78,6 +78,18 @@ _task_cfg_set(){
   [ -n "$val" ] && printf '%s=%s\n' "$key" "$val" >> "$f"
 }
 
+# Settings that support a PER-REPO override ('<key>.<repokey>' wins over the global '<key>').
+_task_setting_perrepo(){ case "$1" in ram|cpus|claude_mode|claude_effort|claude_model) return 0 ;; *) return 1 ;; esac; }
+# Read a setting honoring that override: the per-repo value (if set) else the global. $2 = repokey.
+_task_cfg_r(){ local v; v="$(_task_cfg "$1.$2")"; [ -n "$v" ] && { printf '%s' "$v"; return 0; }; _task_cfg "$1"; }
+# Candidate repokeys to offer when scoping a per-repo setting: repos with a toolchain, repos with a
+# persisted memory dir, and any repokey already carrying an override in .config. Deduped, sorted.
+_task_repo_candidates(){
+  { _task_toolchain_list
+    local d b; for d in "$(_task_wsdir)/.memory/"*/; do [ -d "$d" ] || continue; b="$(basename "$d")"; [ "$b" = _global ] && continue; printf '%s\n' "$b"; done
+    sed -nE 's/^[a-z_]+\.([a-z0-9._-]+)=.*/\1/p' "$(_task_cfg_file)" 2>/dev/null
+  } 2>/dev/null | grep -vE '^$' | sort -u; }
+
 _task_help(){
   cat <<'EOF'
 task — isolated Claude sessions in disposable containers.
@@ -460,10 +472,13 @@ _task_setting_validate(){
   return 1
 }
 
-# Pretty current value for the list (— when unset; note the effective default).
+# Pretty current value for the list (— when unset; note the effective default). For per-repo-capable
+# settings, append '· N repo(s)' when overrides exist, so the menu flags that the global isn't the whole
+# story.
 _task_setting_show(){ local v; v="$(_task_cfg "$1")"
   if [ -n "$v" ]; then printf '%s' "$v"; else case "$1" in
-    memory) printf 'repo (default)' ;; notify) printf 'off' ;; cpus) printf '2 (default)' ;; ram) printf '4g (default)' ;; *) printf '—' ;; esac; fi; }
+    memory) printf 'repo (default)' ;; notify) printf 'off' ;; cpus) printf '2 (default)' ;; ram) printf '4g (default)' ;; *) printf '—' ;; esac; fi
+  if _task_setting_perrepo "$1"; then local n; n="$(grep -cE "^$1\.[a-z0-9._-]+=" "$(_task_cfg_file)" 2>/dev/null)"; [ "${n:-0}" -gt 0 ] && printf ' · %s repo(s)' "$n"; fi; }
 
 # Pickable value choices for a setting, one per line as "<stored-value>|<label>" (empty value =
 # clear/default). Returns 1 for free-form settings (lang/model/dns), which are typed instead.
@@ -480,13 +495,29 @@ esac; }
 # Edit ONE setting: a value picker (arrow keys) for settings with a known set — so you can't even
 # enter an invalid value — or a validated typed prompt for free-form ones (lang/model/dns).
 _task_setting_edit(){
-  local k="$1" choices; choices="$(_task_setting_choices "$k")"
+  # $k = the setting NAME (drives choices/hint/validation); ek = the STORAGE KEY (== $k, or
+  # '$k.<repokey>' when the user scopes a per-repo-capable setting to a single repo).
+  local k="$1" ek="$1"
+  if _task_setting_perrepo "$k"; then
+    _task_select "Portée de '$k'" "global (tous les repos)" "un repo précis…" || return 0
+    if [ "$_TASK_SEL_IDX" -eq 1 ]; then
+      local -a cands=(); mapfile -t cands < <(_task_repo_candidates)
+      _task_select "Repo pour '$k'" "${cands[@]}" "＋ saisir un autre repo…" || return 0
+      local rk
+      if [ "$_TASK_SEL_IDX" -ge "${#cands[@]}" ]; then
+        printf '\n  repokey (<owner>-<repo>, ex. alexandregensse-blip-odile_trouche) > ' > /dev/tty
+        read -r rk < /dev/tty || return 0; [ -z "$rk" ] && return 0
+      else rk="${cands[$_TASK_SEL_IDX]}"; fi
+      ek="$k.$rk"
+    fi
+  fi
+  local choices; choices="$(_task_setting_choices "$k")"
   if [ -n "$choices" ]; then
     local -a labels=() vals=(); local val lab
     while IFS='|' read -r val lab; do vals+=("$val"); labels+=("$lab"); done <<< "$choices"
-    _task_select "Set '$k'" "${labels[@]}" || return 0          # cancelled → leave unchanged
-    _task_cfg_set "$k" "${vals[$_TASK_SEL_IDX]}"
-    [ -n "${vals[$_TASK_SEL_IDX]}" ] && echo "  ✓ $k = ${vals[$_TASK_SEL_IDX]}" || echo "  ✓ $k cleared (default)"
+    _task_select "Set '$ek'" "${labels[@]}" || return 0          # cancelled → leave unchanged
+    _task_cfg_set "$ek" "${vals[$_TASK_SEL_IDX]}"
+    [ -n "${vals[$_TASK_SEL_IDX]}" ] && echo "  ✓ $ek = ${vals[$_TASK_SEL_IDX]}" || echo "  ✓ $ek cleared (default)"
     # Turning WhatsApp on here → link the phone right away (one-time QR + group pick), so the next task
     # is ready. Already-linked → just confirm. Never errors out of the settings menu.
     if [ "$k" = notify ]; then case ",${vals[$_TASK_SEL_IDX]}," in *,whatsapp,*)
@@ -498,13 +529,13 @@ _task_setting_edit(){
   # free-form: typed value with validation (Enter=keep · "-"=clear)
   local cur ans
   while :; do
-    cur="$(_task_cfg "$k")"
-    printf '\n  %s — %s\n  [now: %s · Enter=keep · "-"=clear] > ' "$k" "$(_task_setting_hint "$k")" "${cur:-none}" > /dev/tty
+    cur="$(_task_cfg "$ek")"
+    printf '\n  %s — %s\n  [now: %s · Enter=keep · "-"=clear] > ' "$ek" "$(_task_setting_hint "$k")" "${cur:-none}" > /dev/tty
     read -r ans < /dev/tty || return 0
     case "$ans" in
       '') return 0 ;;
-      '-') _task_cfg_set "$k" ""; echo "  ✓ $k cleared" > /dev/tty; return 0 ;;
-      *) if _task_setting_validate "$k" "$ans"; then _task_cfg_set "$k" "$ans"; echo "  ✓ $k = $ans" > /dev/tty; return 0
+      '-') _task_cfg_set "$ek" ""; echo "  ✓ $ek cleared" > /dev/tty; return 0 ;;
+      *) if _task_setting_validate "$k" "$ans"; then _task_cfg_set "$ek" "$ans"; echo "  ✓ $ek = $ans" > /dev/tty; return 0
          else echo "  ✗ $_TASK_SETTING_ERR" > /dev/tty; fi ;;
     esac
   done
@@ -997,9 +1028,11 @@ _task_run(){
   image="$(_task_ensure_repo_image "$_repokey")" || return 1
 
   # Claude launch flags from the config (env override wins; 'task settings' edits them):
-  # claude_mode → --permission-mode, claude_model → --model, claude_effort → --effort.
+  # claude_mode → --permission-mode, claude_model → --model, claude_effort → --effort. Each honors a
+  # per-repo override ('<key>.<repokey>') over the global value.
   local -a cflags=()
-  local _m _md _ef; _m="$(_task_cfg claude_mode)"; _md="$(_task_cfg claude_model)"; _ef="$(_task_cfg claude_effort)"
+  local _m _md _ef
+  _m="$(_task_cfg_r claude_mode "$_repokey")"; _md="$(_task_cfg_r claude_model "$_repokey")"; _ef="$(_task_cfg_r claude_effort "$_repokey")"
   [ -n "$_m" ]  && cflags+=(--permission-mode "$_m")
   [ -n "$_md" ] && cflags+=(--model "$_md")
   [ -n "$_ef" ] && cflags+=(--effort "$_ef")
@@ -1049,13 +1082,11 @@ _task_run(){
   fi
 
   # Docker resource limits (NOT the Claude auto-memory above): config 'cpus'/'ram', defaults 2 / 4g.
-  # A PER-REPO override wins over the global value: keys 'ram.<repokey>' / 'cpus.<repokey>' in .config
-  # (repokey = <owner>-<repo>, same as the toolchain image). Lets one heavy repo (e.g. odile_trouche:
-  # Chromium + Vite + faster-whisper large-v3) get more RAM without raising it for every task. Falls back
-  # to the global 'ram'/'cpus', then to the defaults on line 1125.
+  # Both honor a per-repo override ('ram.<repokey>' / 'cpus.<repokey>') over the global, then the defaults
+  # on line 1125. Lets one heavy repo (e.g. odile_trouche: Chromium + Vite + faster-whisper) get more RAM
+  # without raising it for every task.
   local _cpus _ram
-  _cpus="$(_task_cfg "cpus.$_repokey")"; [ -z "$_cpus" ] && _cpus="$(_task_cfg cpus)"
-  _ram="$(_task_cfg "ram.$_repokey")";  [ -z "$_ram" ]  && _ram="$(_task_cfg ram)"
+  _cpus="$(_task_cfg_r cpus "$_repokey")"; _ram="$(_task_cfg_r ram "$_repokey")"
 
   # Conversation history persists per-clone on the HOST (survives the disposable --rm container; resume
   # continues it). Inside .git/ so it's out of the worktree and removed with the clone. mkdir first so
