@@ -28,6 +28,26 @@ _task_slots_dir(){ printf '%s' "$(_task_wsdir)/.claude-slots"; }
 _task_cfg_file(){ printf '%s' "$(_task_wsdir)/.config"; }
 _task_bases_file(){ printf '%s' "$(_task_wsdir)/.bases"; }
 
+# Shared outbound-SSH key for the task containers. Lives OUTSIDE any image (like .auth/whatsapp) under
+# <ws>/.auth/ssh, generated once, lazily. The PRIVATE key is injected at run time (env WS_SSH_KEY) and
+# written to ~/.ssh in-container by the launch wrapper; the PUBLIC key (id_ed25519.pub) is yours to put
+# on servers / GitHub. Never baked into a layer (the base image is committed).
+_task_ssh_dir(){ printf '%s' "$(_task_wsdir)/.auth/ssh"; }
+# Ensure the keypair exists; echo the private-key path on success (nothing on failure — SSH just stays
+# unconfigured, tasks still run). ssh-keygen may be absent on the host, so generate INSIDE a container
+# (openssh-keygen is in the base image); files land owned by uid 1000 = the host user, so host-readable.
+_task_ssh_ensure(){
+  local d k; d="$(_task_ssh_dir)"; k="$d/id_ed25519"
+  if [ ! -f "$k" ]; then
+    mkdir -p "$d"; chmod 700 "$d" 2>/dev/null || true
+    docker image inspect workstation >/dev/null 2>&1 || return 0   # no base image yet → skip silently
+    $(_task_dock) run --rm -v "$d:/k" workstation \
+      sh -c 'ssh-keygen -q -t ed25519 -N "" -C "workstation-shared" -f /k/id_ed25519 \
+             && chmod 600 /k/id_ed25519 && chmod 644 /k/id_ed25519.pub' >/dev/null 2>&1 || return 0
+  fi
+  [ -f "$k" ] && printf '%s' "$k"
+}
+
 # Tiny pure-bash JSON readers (the host has NO jq — only docker/git/gh). They extract ONE value for a
 # key that occurs once in Claude's small config files (e.g. emailAddress, expiresAt). Not a general
 # parser: same pragmatic trade-off as the .config reader. Empty output when the key is absent/null.
@@ -44,6 +64,10 @@ _task_json_num(){ local f="$1" k="$2" v
 #   _task_cfg <key>   e.g. _task_cfg notify / claude_mode / lang / theme / dns / statusline
 _task_cfg(){
   local key="$1" ev="WORKSTATION_${1^^}"
+  # Sanitize the env-override name: per-repo keys like 'ram.<owner>-<repo>' contain '.'/'-' which are
+  # illegal in a shell variable name and would make ${!ev} abort. Map them to '_' so the override still
+  # works (WORKSTATION_RAM_<REPO>) and simple keys (ram → WORKSTATION_RAM) are unchanged.
+  ev="${ev//[^A-Z0-9_]/_}"
   if [ -n "${!ev:-}" ]; then printf '%s' "${!ev}"; return 0; fi
   sed -n "s/^${key}=//p" "$(_task_cfg_file)" 2>/dev/null | tail -1
 }
@@ -1006,8 +1030,32 @@ _task_run(){
   fi
   local -a featenv=(-e "WS_NOTIFY=$_notify" -e "WS_LANG=$_lang" -e "WS_THEME=$_theme" -e "WS_SL=$_sl" -e "WS_MEMDIR=$_wsmem")
 
+  # Outbound SSH: inject the shared private key (generated lazily) so every container can ssh out. The
+  # launch wrapper writes $WS_SSH_KEY into ~/.ssh/id_ed25519 (perms fixed there). Empty if generation
+  # failed / no base image → no key, tasks still run.
+  local -a sshenv=(); local _sshkey; _sshkey="$(_task_ssh_ensure)"
+  [ -n "$_sshkey" ] && sshenv=(-e "WS_SSH_KEY=$(cat "$_sshkey")")
+
+  # Global secrets for EVERY container, from <ws>/.auth/env (KEY=VALUE lines, gitignored) — e.g.
+  # CLOUDFLARE_API_TOKEN. Injected at run time so they never land in the committed base image. Blank
+  # lines and #comments are skipped; only lines containing '=' are passed (so a bare name can't leak the
+  # host's own env value via `-e NAME`).
+  local -a authenv=(); local _authf _line; _authf="$(_task_wsdir)/.auth/env"
+  if [ -f "$_authf" ]; then
+    while IFS= read -r _line || [ -n "$_line" ]; do
+      case "$_line" in ''|'#'*) continue ;; esac
+      case "$_line" in *=*) authenv+=(-e "$_line") ;; esac
+    done < "$_authf"
+  fi
+
   # Docker resource limits (NOT the Claude auto-memory above): config 'cpus'/'ram', defaults 2 / 4g.
-  local _cpus _ram; _cpus="$(_task_cfg cpus)"; _ram="$(_task_cfg ram)"
+  # A PER-REPO override wins over the global value: keys 'ram.<repokey>' / 'cpus.<repokey>' in .config
+  # (repokey = <owner>-<repo>, same as the toolchain image). Lets one heavy repo (e.g. odile_trouche:
+  # Chromium + Vite + faster-whisper large-v3) get more RAM without raising it for every task. Falls back
+  # to the global 'ram'/'cpus', then to the defaults on line 1125.
+  local _cpus _ram
+  _cpus="$(_task_cfg "cpus.$_repokey")"; [ -z "$_cpus" ] && _cpus="$(_task_cfg cpus)"
+  _ram="$(_task_cfg "ram.$_repokey")";  [ -z "$_ram" ]  && _ram="$(_task_cfg ram)"
 
   # Conversation history persists per-clone on the HOST (survives the disposable --rm container; resume
   # continues it). Inside .git/ so it's out of the worktree and removed with the clone. mkdir first so
@@ -1031,6 +1079,7 @@ _task_run(){
     [ -f "$ws_dir/.claude/claude-keys.json" ] && cfg_mounts+=(-v "$ws_dir/.claude/claude-keys.json:/seed/claude-keys.json:ro")
     [ -f "$ws_dir/gh/config.yml" ]            && cfg_mounts+=(-v "$ws_dir/gh/config.yml:/home/dev/.config/gh/config.yml:ro")
     claude_cmd=(bash -lc '
+      [ -n "${WS_SSH_KEY:-}" ] && { install -d -m 700 ~/.ssh && printf "%s\n" "$WS_SSH_KEY" > ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519 && { [ -f ~/.ssh/config ] || printf "Host *\n\tStrictHostKeyChecking accept-new\n" > ~/.ssh/config; }; }
       CFG=/cfg; mkdir -p "$CFG"
       # seed the baked config into the writable slot dir each start (so image updates propagate); the
       # slot keeps its own .credentials.json (none is baked) and projects/ (mounted) untouched.
@@ -1065,6 +1114,7 @@ _task_run(){
     [ -f "$ws_dir/.claude/claude-keys.json" ] && cfg_mounts+=(-v "$ws_dir/.claude/claude-keys.json:/seed/claude-keys.json:ro")
     session=(-v "$proj:/home/dev/.claude/projects")
     claude_cmd=(bash -lc '
+      [ -n "${WS_SSH_KEY:-}" ] && { install -d -m 700 ~/.ssh && printf "%s\n" "$WS_SSH_KEY" > ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519 && { [ -f ~/.ssh/config ] || printf "Host *\n\tStrictHostKeyChecking accept-new\n" > ~/.ssh/config; }; }
       cfg="$HOME/.claude.json"; [ -f "$cfg" ] || printf "{}" > "$cfg"
       [ -f /seed/claude-keys.json ] && { jq -s ".[0] * .[1]" "$cfg" /seed/claude-keys.json > /tmp/c1 2>/dev/null && mv /tmp/c1 "$cfg"; }
       jq ".projects[\"/work\"] += {hasTrustDialogAccepted:true, hasCompletedProjectOnboarding:true}" "$cfg" > /tmp/c2 2>/dev/null && mv /tmp/c2 "$cfg"
@@ -1116,6 +1166,8 @@ _task_run(){
     "${claude_auth[@]}" \
     "${cfg_mounts[@]}" \
     "${featenv[@]}" \
+    "${sshenv[@]}" \
+    "${authenv[@]}" \
     "${gitenv[@]}" \
     "${dns[@]}" \
     "${session[@]}" \

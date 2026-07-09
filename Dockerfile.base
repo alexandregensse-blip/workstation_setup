@@ -40,10 +40,16 @@ RUN i=1; until curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/in
 # PATH, so a system nodejs makes the Python LSP actually start — no bundled-node download, no egress
 # dependency. (TS/JS LSP also reuses this Node; Go still needs gopls where the Go toolchain lives.)
 #
+# openssh-client (+ openssh-keygen: in Wolfi `ssh` and `ssh-keygen` are SEPARATE packages) lives here
+# too so EVERY task container can SSH OUT (git over ssh, deploy, rsync). No key is baked — task.sh injects
+# a shared private key at RUN time (env WS_SSH_KEY, from <ws>/.auth/ssh) into ~/.ssh; the public half goes
+# on your servers. Base is committed, so a baked key would leak — runtime injection keeps it out of layers.
+#
 # Last layer on purpose: rebuilds reuse all the cached toolchain layers above.
 USER root
 RUN apk add --no-cache grep sed gawk coreutils findutils diffutils util-linux flock gzip patch procps \
-    nodejs-20
+    nodejs-20 \
+    openssh-client openssh-keygen
 USER dev
 
 # Pre-warm the exact pyright Serena pins (uv caches the wheel) so the Python LSP starts even with NO
