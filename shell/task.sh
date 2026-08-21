@@ -897,7 +897,7 @@ _ws_wa_bridge_up(){ local dock auth img; dock="$(_task_dock)"
   auth="$(_ws_wa_auth)"; mkdir -p "$auth/auth" "$(_ws_wa_dir)/outbox"
   img="$(_ws_wa_ensure_image)" || return 1
   $dock rm -f "$_ws_wa_container" >/dev/null 2>&1 || true
-  $dock run -d --name "$_ws_wa_container" \
+  $dock run -d --init --name "$_ws_wa_container" \
     -v "$auth:/data" -v "$(_ws_wa_dir)/outbox:/outbox" \
     "$img" run >/dev/null 2>&1; }
 _ws_wa_bridge_down(){ local dock; dock="$(_task_dock)"; $dock rm -f "$_ws_wa_container" >/dev/null 2>&1 || true; }
@@ -1189,7 +1189,7 @@ _task_run(){
     fi
   fi
 
-  $dock run -it --rm \
+  $dock run -it --rm --init \
     --name "$_cname" \
     -v "$dir:/work" -w /work \
     -e GH_TOKEN="$gh_token" \
