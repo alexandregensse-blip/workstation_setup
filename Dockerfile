@@ -13,6 +13,8 @@ COPY --chown=dev:dev claude/CLAUDE.md     /home/dev/dev/AGENTS.md
 COPY --chown=dev:dev claude/settings.json /home/dev/.claude/settings.json
 COPY --chown=dev:dev claude/statusline.sh /home/dev/.claude/statusline.sh
 COPY --chown=dev:dev dev/CLAUDE.md        /home/dev/dev/CLAUDE.md
+# Skills (procédures chargées à la demande), copiées dans le dossier de config au lancement.
+COPY --chown=dev:dev claude/skills        /home/dev/.claude/skills
 
 # WhatsApp notifier hooks (referenced by claude/settings.json). They run in-container on every task but
 # no-op instantly unless WhatsApp notify is enabled (WS_NOTIFY_WHATSAPP=1 + the /ws-whatsapp mount), so
