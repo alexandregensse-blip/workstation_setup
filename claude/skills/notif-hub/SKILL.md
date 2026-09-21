@@ -22,7 +22,13 @@ serveur les chiffre et les garde. Tu y accèdes en lecture seule avec une clé d
 curl -sf -H "Authorization: Bearer $NOTIF_HUB_CLE" https://notif-hub.agensse.com/api/v1/depots
 ```
 
-Réponse JSON (pas de `jq` dans l'image : la lire directement) : les 100 derniers dépôts, du plus récent au plus ancien. Chaque dépôt a une ou plusieurs pièces :
+Réponse JSON (pas de `jq` dans l'image : la lire directement) : les 100 derniers dépôts, du plus récent au plus ancien.
+
+Un dépôt sans champ `source` vient d'Alexandre (son téléphone). Un dépôt avec `source` a été
+envoyé par un de ses sites (`"source": "odile"`, par exemple) ; son texte est dans `texte.txt`.
+Quand il parle de « ce que je t'ai envoyé », ce sont ses dépôts à lui, sans `source`.
+
+Chaque dépôt a une ou plusieurs pièces :
 
 - `partage.txt` : le texte ou le lien partagé (titre, texte, URL réunis) ;
 - `Discussion WhatsApp avec … .txt` : un export de discussion, déjà filtré sur la période choisie
