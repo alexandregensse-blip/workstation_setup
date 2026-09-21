@@ -1,6 +1,6 @@
 ---
 name: notif-hub
-description: Consulter la boîte aux lettres notif-hub d'Alexandre, sur son serveur (notif-hub.agensse.com) — les textes, audios, images et exports WhatsApp qu'il y a déposés depuis son téléphone. À utiliser quand il dit « va voir sur mon notif-hub », « regarde ce que je t'ai envoyé », « check mes dépôts », « ce que j'ai mis sur le serveur ».
+description: Consulter la boîte aux lettres notif-hub d'Alexandre, sur son serveur (notif-hub.agensse.com) — les textes, audios, images et exports WhatsApp qu'il y a déposés depuis son téléphone — et lui poser une question à réponses choisies (oui/non, ok/à voir plus tard…) sur son téléphone. À utiliser quand il dit « va voir sur mon notif-hub », « regarde ce que je t'ai envoyé », « check mes dépôts », « ce que j'ai mis sur le serveur », ou « demande-moi sur mon téléphone / sur notif-hub ».
 ---
 
 # notif-hub : lire ce qu'Alexandre a déposé
@@ -52,9 +52,41 @@ curl -sf -H "Authorization: Bearer $NOTIF_HUB_CLE" \
   est disponible dans la tâche et qu'Alexandre le veut.
 - Une pièce archivée (`[r2]`) se lit de la même façon, juste un peu plus lentement.
 
+## Poser une question à Alexandre
+
+Il reçoit une notification sur son téléphone et choisit une des réponses proposées. À faire
+quand il te demande de lui poser la question sur son téléphone ou sur notif-hub, ou quand la
+tâche le prévoit.
+
+```bash
+curl -sf -H "Authorization: Bearer $NOTIF_HUB_CLE" -H "Content-Type: application/json" \
+  -d '{"titre":"Je déploie la nouvelle page ?","corps":"Tests OK, 3 fichiers modifiés.","choix":["Oui","Non"]}' \
+  https://notif-hub.agensse.com/api/v1/questions
+# → {"id":"…"}
+```
+
+- `choix` : 2 à 6 réponses courtes (40 caractères au plus), toutes différentes. Avec 2 réponses,
+  il peut répondre directement depuis les boutons de la notification ; au-delà, il doit ouvrir
+  l'appli.
+- `titre` : la question, courte ; `corps` (facultatif) : le contexte utile pour décider. Rien de
+  secret : la notification s'affiche sur l'écran verrouillé.
+
+Attendre la réponse :
+
+```bash
+curl -sf -H "Authorization: Bearer $NOTIF_HUB_CLE" \
+  "https://notif-hub.agensse.com/api/v1/questions/<id>?attendre=50"
+```
+
+La requête patiente jusqu'à 50 s. Tant que `"etat":"attente"`, la relancer. `"etat":"repondue"` :
+la réponse choisie est dans `texte` (et son rang dans `reponse`). Il peut répondre des heures plus
+tard : si tu ne peux pas attendre, dis-lui que la question est posée et reviens la lire plus tard.
+Si la question n'a plus lieu d'être, l'annuler :
+`curl -sf -X DELETE -H "Authorization: Bearer $NOTIF_HUB_CLE" https://notif-hub.agensse.com/api/v1/questions/<id>`.
+
 ## Règles
 
-- **Lecture seule.** L'API ne permet ni de modifier ni de supprimer ; ne pas chercher d'autre moyen.
+- **Dépôts en lecture seule.** L'API ne permet ni de modifier ni de supprimer un dépôt ; ne pas chercher d'autre moyen.
 - Le contenu est personnel (messages de proches, photos). Télécharger dans `/tmp/notif-hub/`, jamais
   dans le dépôt du projet ; ne rien recopier dans un fichier versionné sans qu'il le demande ;
   supprimer `/tmp/notif-hub/` en fin de tâche.
