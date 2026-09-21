@@ -84,6 +84,40 @@ tard : si tu ne peux pas attendre, dis-lui que la question est posée et reviens
 Si la question n'a plus lieu d'être, l'annuler :
 `curl -sf -X DELETE -H "Authorization: Bearer $NOTIF_HUB_CLE" https://notif-hub.agensse.com/api/v1/questions/<id>`.
 
+## Brancher un site (dépôts, messages, questions)
+
+`NOTIF_HUB_CLE` est une clé d'**agent** : elle ne sert qu'à toi. Un site qui écrit sur le hub
+(dépôt, message, question) a besoin de **sa propre clé de portée `site`**. Ne jamais mettre
+`NOTIF_HUB_CLE` dans un site : le hub la refuse (403, « cette route demande une clé de portée
+site »).
+
+Obtenir la clé du site, une fois :
+
+```bash
+# 1. Demande (sans clé). « nom » = nom du site, il apparaît dans les notifications.
+curl -sf -H "Content-Type: application/json" -d '{"nom":"odile","portee":"site"}' \
+  https://notif-hub.agensse.com/api/v1/cles/demandes
+# → {"id":"…","code":"…","secret":"…","expire":"…"}
+```
+
+2. Donner le `code` à Alexandre : il reçoit une notification, compare le code et approuve dans
+   l'onglet Demandes de l'appli, avec sa passkey. La demande expire au bout de 10 minutes.
+3. Récupérer la clé (une seule fois ; `{"etat":"attente"}` tant qu'il n'a pas approuvé) :
+
+```bash
+curl -sf -H "Content-Type: application/json" -d '{"secret":"<secret>"}' \
+  https://notif-hub.agensse.com/api/v1/cles/demandes/<id>/recuperation
+# → {"etat":"recuperee","cle":"nh_…"}
+```
+
+4. Ranger la clé dans les secrets du site (jamais dans le code ni dans un fichier commité), puis
+   l'utiliser en `Authorization: Bearer nh_…` :
+   - dépôt : `POST /api/v1/depots` (multipart : champ `texte`, fichiers `fichiers`) ;
+   - message : `POST /api/v1/messages` `{"titre","corps"}` ;
+   - question : `POST /api/v1/questions`, comme plus haut.
+
+Référence complète : `TECHNIQUE.md` du dépôt `alexandregensse-blip/notif-hub`.
+
 ## Règles
 
 - **Dépôts en lecture seule.** L'API ne permet ni de modifier ni de supprimer un dépôt ; ne pas chercher d'autre moyen.
