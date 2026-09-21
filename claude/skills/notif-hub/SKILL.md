@@ -75,10 +75,10 @@ Attendre la réponse :
 
 ```bash
 curl -sf -H "Authorization: Bearer $NOTIF_HUB_CLE" \
-  "https://notif-hub.agensse.com/api/v1/questions/<id>?attendre=50"
+  "https://notif-hub.agensse.com/api/v1/questions/<id>?attendre=120"
 ```
 
-La requête patiente jusqu'à 50 s. Tant que `"etat":"attente"`, la relancer. `"etat":"repondue"` :
+La requête patiente jusqu'à 2 minutes. Tant que `"etat":"attente"`, la relancer. `"etat":"repondue"` :
 la réponse choisie est dans `texte` (et son rang dans `reponse`). Il peut répondre des heures plus
 tard : si tu ne peux pas attendre, dis-lui que la question est posée et reviens la lire plus tard.
 Si la question n'a plus lieu d'être, l'annuler :
