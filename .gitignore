@@ -16,6 +16,7 @@
 /.claude/
 /.claude-slots/
 /.memory/
+/skills/
 /toolchains/
 /gh/
 /.auth/

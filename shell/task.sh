@@ -202,13 +202,17 @@ _task_menu(){
   # Optional locked rows: a caller sets _TASK_MENU_DISABLED[i]=1 for items that can't be picked (e.g. a
   # running task in 'resume'). Consume it up-front (snapshot + clear) so it never leaks into a later menu.
   local -a dis_in=("${_TASK_MENU_DISABLED[@]}"); _TASK_MENU_DISABLED=()
+  # Same one-shot pattern for: a title, pre-ticked rows (_TASK_MENU_CHECKED[i]=1), and allowing an empty
+  # confirm (a settings checklist where unticking everything is a valid answer).
+  local -a chk_in=("${_TASK_MENU_CHECKED[@]}"); _TASK_MENU_CHECKED=()
+  local mtitle="${_TASK_MENU_TITLE:-Reprendre quelle(s) task ?}" empty_ok="${_TASK_MENU_EMPTY_OK:-0}"; _TASK_MENU_TITLE=""; _TASK_MENU_EMPTY_OK=0
   { true >/dev/tty; } 2>/dev/null || return 2
   local -a items=("$@"); local n=${#items[@]}
   [ "$n" -gt 0 ] || return 1
   local -a sel dis; local j box key rest
-  for ((j=0; j<n; j++)); do sel[j]=0; dis[j]="${dis_in[j]:-0}"; done
+  for ((j=0; j<n; j++)); do sel[j]="${chk_in[j]:-0}"; dis[j]="${dis_in[j]:-0}"; done
   local cur=0 total=$((n+2)) confirm=$n cancel=$((n+1)) drawn=0
-  printf '\n  \033[1mReprendre quelle(s) task ?\033[0m\n  \033[2m↑/↓ déplacer · Espace/Entrée cocher · « Confirmer » pour valider · q/Échap annuler\033[0m\n' > /dev/tty
+  printf '\n  \033[1m%s\033[0m\n  \033[2m↑/↓ déplacer · Espace/Entrée cocher · « Confirmer » pour valider · q/Échap annuler\033[0m\n' "$mtitle" > /dev/tty
   printf '\033[?25l' > /dev/tty                                    # hide cursor
   while :; do
     [ "$drawn" -gt 0 ] && printf '\033[%dA' "$drawn" > /dev/tty   # back to first row, redraw in place
@@ -248,7 +252,7 @@ _task_menu(){
   done
   printf '\033[?25h\n' > /dev/tty                                  # show cursor again
   for ((j=0; j<n; j++)); do [ "${sel[j]}" = 1 ] && { _TASK_PICKED+=("${items[j]}"); _TASK_PICKED_IDX+=("$j"); }; done
-  [ "${#_TASK_PICKED[@]}" -gt 0 ] || return 1
+  [ "$empty_ok" = 1 ] || [ "${#_TASK_PICKED[@]}" -gt 0 ] || return 1
 }
 
 # Interactive SINGLE-select arrow menu. Args: <title> <item>...  ↑/↓ or j/k move, Enter picks the
@@ -433,10 +437,11 @@ _task_cleanup(){
 # settings: show + edit optional features. Stored in <ws>/.config (NOT host env), applied to the next
 # task. Features: notify (terminal bell), lang, theme, dns, and the Claude launch defaults.
 # The editable feature keys, in display order.
-_task_setting_keys(){ printf '%s\n' notify memory lang theme statusline dns cpus ram claude_mode claude_model claude_effort; }
+_task_setting_keys(){ printf '%s\n' skills notify memory lang theme statusline dns cpus ram claude_mode claude_model claude_effort; }
 
 # One-line hint shown for a setting (allowed values / format + what "clear" means).
 _task_setting_hint(){ case "$1" in
+  skills)        echo 'skills from GitHub sources (owner/repo with a skills/ folder), ticked per repo' ;;
   notify)        echo 'terminal_bell (local bell+flash) · whatsapp (ping a dedicated group on your phone) · both = "terminal_bell,whatsapp" · clear = off' ;;
   memory)        echo 'repo (per-repo, default) · global (all repos) · off (per task)' ;;
   lang)          echo 'Claude UI language code, e.g. fr / en / pt-BR · clear = Claude default' ;;
@@ -475,7 +480,10 @@ _task_setting_validate(){
 # Pretty current value for the list (— when unset; note the effective default). For per-repo-capable
 # settings, append '· N repo(s)' when overrides exist, so the menu flags that the global isn't the whole
 # story.
-_task_setting_show(){ local v; v="$(_task_cfg "$1")"
+_task_setting_show(){ local v
+  if [ "$1" = skills ]; then local ns nr; ns="$(_task_cfg skills_sources | wc -w)"; nr="$(grep -cE '^skills\.[a-z0-9._-]+=' "$(_task_cfg_file)" 2>/dev/null)"
+    printf '%s source(s) · %s repo(s)' "$ns" "${nr:-0}"; return 0; fi
+  v="$(_task_cfg "$1")"
   if [ -n "$v" ]; then printf '%s' "$v"; else case "$1" in
     memory) printf 'repo (default)' ;; notify) printf 'off' ;; cpus) printf '2 (default)' ;; ram) printf '4g (default)' ;; *) printf '—' ;; esac; fi
   if _task_setting_perrepo "$1"; then local n; n="$(grep -cE "^$1\.[a-z0-9._-]+=" "$(_task_cfg_file)" 2>/dev/null)"; [ "${n:-0}" -gt 0 ] && printf ' · %s repo(s)' "$n"; fi; }
@@ -498,6 +506,7 @@ _task_setting_edit(){
   # $k = the setting NAME (drives choices/hint/validation); ek = the STORAGE KEY (== $k, or
   # '$k.<repokey>' when the user scopes a per-repo-capable setting to a single repo).
   local k="$1" ek="$1"
+  [ "$k" = skills ] && { _task_skills_settings; return 0; }
   if _task_setting_perrepo "$k"; then
     _task_select "Portée de '$k'" "global (tous les repos)" "un repo précis…" || return 0
     if [ "$_TASK_SEL_IDX" -eq 1 ]; then
@@ -559,6 +568,92 @@ _task_settings(){
     _task_setting_edit "${keys[$_TASK_SEL_IDX]}"
   done
   echo "✓ Saved to $cf — applies to the next task (no host environment touched)."
+}
+
+# --- SKILLS catalog (per-repo, picked in 'task settings' — no install command to remember) ---
+# A skill SOURCE is a GitHub repo (owner/repo, private OK via host gh) holding skills under
+# skills/<name>/SKILL.md. Config 'skills_sources' lists the sources; each is mirrored host-side in
+# <ws>/skills/<owner-repo>/<name>/ and re-downloaded only when the source's default-branch commit moved.
+# Config 'skills.<repokey>' = the ticked "<owner-repo>/<name>" for that repo. At launch the ticked
+# sources are synced, <ws>/skills is mounted read-only at /ws-skills, and the container links each ticked
+# skill into Claude's skills dir (a baked skill with the same name wins).
+_task_skills_dir(){ printf '%s' "$(_task_wsdir)/skills"; }
+
+# Mirror source $1 (owner/repo) into the catalog. No-op when already at the source's head commit;
+# on any failure the previous mirror is kept untouched.
+_task_skills_sync(){
+  local src="$1" key root sha stage files mode path out
+  key="$(_task_key_from_repo "$src")"; root="$(_task_skills_dir)/$key"
+  sha="$(gh api "repos/$src/commits/HEAD" --jq .sha 2>/dev/null)" || { echo "task: skill source $src unreachable — keeping the current copy." >&2; return 1; }
+  [ -f "$root/.commit" ] && [ "$(<"$root/.commit")" = "$sha" ] && return 0
+  mkdir -p "$(_task_skills_dir)"; stage="$(mktemp -d "$(_task_skills_dir)/.sync.XXXXXX")" || return 1
+  files="$(gh api "repos/$src/git/trees/$sha?recursive=1" \
+    --jq '.tree[] | select(.type == "blob" and (.path | startswith("skills/"))) | "\(.mode) \(.path)"' 2>/dev/null)"
+  [ -n "$files" ] || { echo "task: no skills/ folder in $src." >&2; rm -rf "$stage"; return 1; }
+  while read -r mode path; do
+    out="$stage/${path#skills/}"; mkdir -p "$(dirname "$out")"
+    gh api "repos/$src/contents/$path?ref=$sha" -H "Accept: application/vnd.github.raw" > "$out" 2>/dev/null \
+      || { echo "task: download failed ($src/$path) — keeping the current copy." >&2; rm -rf "$stage"; return 1; }
+    [ "$mode" = 100755 ] && chmod +x "$out"
+  done <<< "$files"
+  printf '%s\n' "$src" > "$stage/.source"; printf '%s\n' "$sha" > "$stage/.commit"
+  rm -rf "$root.old"; [ -e "$root" ] && mv "$root" "$root.old"; mv -T "$stage" "$root"; rm -rf "$root.old" "$stage"
+  echo "task: skills from $src synced (${sha:0:7})." >&2
+}
+
+# Catalog entries "<owner-repo>/<name>", one per line, for the configured sources.
+_task_skills_catalog(){ local src key d
+  for src in $(_task_cfg skills_sources); do key="$(_task_key_from_repo "$src")"
+    for d in "$(_task_skills_dir)/$key"/*/; do [ -f "${d}SKILL.md" ] && printf '%s/%s\n' "$key" "$(basename "$d")"; done
+  done; }
+
+# Sync the sources of the skills ticked for repokey $1 (launch path; failures never block the task).
+_task_skills_sync_for(){ local s k src; local -A done_=()
+  for s in $(_task_cfg "skills.$1"); do k="${s%%/*}"; [ -n "${done_[$k]+x}" ] && continue; done_[$k]=1
+    src="$(cat "$(_task_skills_dir)/$k/.source" 2>/dev/null)"; [ -n "$src" ] && _task_skills_sync "$src"
+  done; return 0; }
+
+# settings → skills: tick skills per repo, add/remove sources.
+_task_skills_settings(){
+  local -a cands srcs; local src ans rk k
+  while :; do
+    mapfile -t cands < <(_task_repo_candidates)
+    _task_select "Skills — choisir un repo, ou gérer les sources" "${cands[@]}" "＋ saisir un autre repo…" "＋ ajouter une source (owner/repo)…" "− retirer une source…" "✔ Done" || return 0
+    local i="$_TASK_SEL_IDX" nc="${#cands[@]}"
+    if [ "$i" -eq $((nc+3)) ]; then return 0
+    elif [ "$i" -eq $((nc+1)) ]; then
+      printf '\n  source GitHub (owner/repo, avec un dossier skills/) > ' > /dev/tty; read -r src < /dev/tty || continue
+      src="${src%.git}"; src="${src#*github.com/}"
+      [[ "$src" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { [ -n "$src" ] && echo "  ✗ format attendu : owner/repo" > /dev/tty; continue; }
+      _task_skills_sync "$src" || continue
+      case " $(_task_cfg skills_sources) " in *" $src "*) : ;; *) _task_cfg_set skills_sources "$(printf '%s ' $(_task_cfg skills_sources) "$src" | xargs)" ;; esac
+      echo "  ✓ source $src ajoutée — coche ses skills dans un repo." > /dev/tty
+    elif [ "$i" -eq $((nc+2)) ]; then
+      read -ra srcs <<< "$(_task_cfg skills_sources)"; [ "${#srcs[@]}" -gt 0 ] || { echo "  (aucune source)" > /dev/tty; continue; }
+      _task_select "Retirer quelle source ?" "${srcs[@]}" || continue
+      src="${srcs[$_TASK_SEL_IDX]}"; k="$(_task_key_from_repo "$src")"
+      _task_cfg_set skills_sources "$(printf '%s\n' "${srcs[@]}" | grep -vxF "$src" | xargs)"
+      while IFS= read -r rk; do [ -n "$rk" ] || continue
+        _task_cfg_set "skills.$rk" "$(printf '%s\n' $(_task_cfg "skills.$rk") | grep -v "^$k/" | xargs)"
+      done < <(sed -nE 's/^skills\.([a-z0-9._-]+)=.*/\1/p' "$(_task_cfg_file)" 2>/dev/null)
+      rm -rf "$(_task_skills_dir)/${k:?}"
+      echo "  ✓ source $src retirée (et décochée partout)." > /dev/tty
+    else
+      if [ "$i" -eq "$nc" ]; then
+        printf '\n  repokey (<owner>-<repo>, ex. alexandregensse-blip-auto-seo-skills) > ' > /dev/tty
+        read -r rk < /dev/tty || continue; [ -z "$rk" ] && continue
+      else rk="${cands[$i]}"; fi
+      for src in $(_task_cfg skills_sources); do _task_skills_sync "$src"; done
+      local -a cat=(); mapfile -t cat < <(_task_skills_catalog)
+      [ "${#cat[@]}" -gt 0 ] || { echo "  (aucun skill disponible — ajoute d'abord une source)" > /dev/tty; continue; }
+      local cur j; cur=" $(_task_cfg "skills.$rk") "; _TASK_MENU_CHECKED=()
+      for j in "${!cat[@]}"; do case "$cur" in *" ${cat[j]} "*) _TASK_MENU_CHECKED[j]=1 ;; esac; done
+      _TASK_MENU_TITLE="Skills actifs pour $rk"; _TASK_MENU_EMPTY_OK=1
+      _task_menu "${cat[@]}" || continue
+      _task_cfg_set "skills.$rk" "${_TASK_PICKED[*]}"
+      echo "  ✓ $rk : ${_TASK_PICKED[*]:-aucun skill}" > /dev/tty
+    fi
+  done
 }
 
 # --- Claude credential SLOTS (independent, self-refreshing logins; one per concurrent task) ---
@@ -1061,6 +1156,9 @@ _task_run(){
     mkdir -p "$_memdir"
     memmount=(-v "$_memdir:/memory"); _wsmem=/memory
   fi
+  # Skills ticked for this repo in 'task settings' (catalog synced first; see _task_skills_settings).
+  local -a skillmount=(); local _skills; _skills="$(_task_cfg "skills.$_repokey")"
+  if [ -n "$_skills" ]; then _task_skills_sync_for "$_repokey"; skillmount=(-v "$(_task_skills_dir):/ws-skills:ro" -e "WS_SKILLS=$_skills"); fi
   local -a featenv=(-e "WS_NOTIFY=$_notify" -e "WS_LANG=$_lang" -e "WS_THEME=$_theme" -e "WS_SL=$_sl" -e "WS_MEMDIR=$_wsmem")
 
   # Outbound SSH: inject the shared private key (generated lazily) so every container can ssh out. The
@@ -1124,6 +1222,10 @@ _task_run(){
       # login mode too (headless mode already reads the baked ~/.claude.json directly). Slot keys win.
       [ -f /home/dev/.claude.json ] && { jq -s ".[0] + {mcpServers: ((.[1].mcpServers // {}) + (.[0].mcpServers // {}))}" "$cfg" /home/dev/.claude.json > /tmp/cmcp 2>/dev/null && mv /tmp/cmcp "$cfg"; }
       jq ".projects[\"/work\"] += {hasTrustDialogAccepted:true, hasCompletedProjectOnboarding:true}" "$cfg" > /tmp/c2 2>/dev/null && mv /tmp/c2 "$cfg"
+      # link the ticked skills of this repo (mounted at /ws-skills); drop links left by another repo
+      SK="$CFG/skills"; mkdir -p "$SK"
+      for l in "$SK"/*; do [ -L "$l" ] && case "$(readlink "$l")" in /ws-skills/*) rm -f "$l" ;; esac; done
+      for s in ${WS_SKILLS:-}; do [ -f "/ws-skills/$s/SKILL.md" ] && [ ! -e "$SK/${s#*/}" ] && ln -s "/ws-skills/$s" "$SK/${s#*/}"; done
       [ "${WS_RESUME:-0}" = 1 ] && compgen -G "$CFG/projects/*/*.jsonl" >/dev/null 2>&1 && set -- --continue "$@"
       S="$(jq -cn --arg n "$WS_NOTIFY" --arg l "$WS_LANG" --arg t "$WS_THEME" --arg s "$WS_SL" --arg m "$WS_MEMDIR" "{}
         | (if \$n != \"\" then .preferredNotifChannel = \$n else . end)
@@ -1149,6 +1251,10 @@ _task_run(){
       cfg="$HOME/.claude.json"; [ -f "$cfg" ] || printf "{}" > "$cfg"
       [ -f /seed/claude-keys.json ] && { jq -s ".[0] * .[1]" "$cfg" /seed/claude-keys.json > /tmp/c1 2>/dev/null && mv /tmp/c1 "$cfg"; }
       jq ".projects[\"/work\"] += {hasTrustDialogAccepted:true, hasCompletedProjectOnboarding:true}" "$cfg" > /tmp/c2 2>/dev/null && mv /tmp/c2 "$cfg"
+      # link the ticked skills of this repo (mounted at /ws-skills); drop links left by another repo
+      SK="$HOME/.claude/skills"; mkdir -p "$SK"
+      for l in "$SK"/*; do [ -L "$l" ] && case "$(readlink "$l")" in /ws-skills/*) rm -f "$l" ;; esac; done
+      for s in ${WS_SKILLS:-}; do [ -f "/ws-skills/$s/SKILL.md" ] && [ ! -e "$SK/${s#*/}" ] && ln -s "/ws-skills/$s" "$SK/${s#*/}"; done
       [ "${WS_RESUME:-0}" = 1 ] && compgen -G "$HOME/.claude/projects/*/*.jsonl" >/dev/null 2>&1 && set -- --continue "$@"
       S="$(jq -cn --arg n "$WS_NOTIFY" --arg l "$WS_LANG" --arg t "$WS_THEME" --arg s "$WS_SL" --arg m "$WS_MEMDIR" "{}
         | (if \$n != \"\" then .preferredNotifChannel = \$n else . end)
@@ -1203,6 +1309,7 @@ _task_run(){
     "${dns[@]}" \
     "${session[@]}" \
     "${memmount[@]}" \
+    "${skillmount[@]}" \
     "${resume_env[@]}" \
     "${wa_args[@]}" \
     --memory="${_ram:-4g}" --cpus="${_cpus:-2}" \

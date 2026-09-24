@@ -221,6 +221,13 @@ WORKSTATION_CLAUDE_MODEL=sonnet task autodev quick-experiment
 task settings       # set  memory = repo (default) | global | off
 ```
 
+**Give a repo's tasks extra skills** (from any GitHub repo with a `skills/<name>/SKILL.md` layout, private OK):
+```bash
+task settings       # skills → add a source (owner/repo), then pick a repo and tick its skills
+```
+Sources are mirrored in `<ws>/skills/` (re-downloaded only when the source's commit moves, checked at
+each launch) and linked read-only into that repo's tasks. A skill baked in the image with the same name wins.
+
 **Run several long (hours/days) tasks in parallel** — one independent login per concurrent task:
 ```bash
 task auth work                # browser login, once per login (can be a different account)
