@@ -64,7 +64,7 @@ restarting docker. It's **recorded** so `uninstall.sh` reverts it, and you can s
 task <repo> [topic]              # start: repo fuzzy-matched to your gh repos; topic → timestamp if omitted
 task --here <repo> [topic]       # base = current directory
 task --at /path <repo> [topic]   # base = given path
-task resume                      # reopen task clones (pick some in a checkbox menu), each in a new tab, CONTINUING its Claude session
+task resume                      # reopen task clones (checkbox menu), CONTINUING their Claude session — one pick runs here, several open a tab each
 task list                        # status of every clone: running/idle, which login, git state — plus a logins summary
 task cleanup [-y]                # delete clones that are clean AND fully pushed (asks; -y skips the prompt)
 task cleanup -f                  # checkbox menu to DISCARD clones incl. uncommitted/unpushed work

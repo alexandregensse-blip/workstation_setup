@@ -305,6 +305,11 @@ _task_resume(){
   _task_menu "${labels[@]}"; local rc=$?
   [ "$rc" = 2 ] && { echo "task: no TTY to choose."; return 1; }
   [ "$rc" = 0 ] || { echo "task: cancelled."; return 0; }
+  # One pick → run it right here (this terminal tab); several → one new tab each.
+  if [ "${#_TASK_PICKED_IDX[@]}" -eq 1 ]; then
+    local d="${clones[${_TASK_PICKED_IDX[0]}]}"
+    echo "→ resuming $(_task_clone_label "$d") in this terminal"; _task_run "$d" "$(basename "$d")" resume; return $?
+  fi
   local i; for i in "${_TASK_PICKED_IDX[@]}"; do
     echo "→ opening $(_task_clone_label "${clones[$i]}")"; _task_newtab "task open $(printf %q "${clones[$i]}")"
   done
@@ -582,23 +587,28 @@ _task_skills_dir(){ printf '%s' "$(_task_wsdir)/skills"; }
 # Mirror source $1 (owner/repo) into the catalog. No-op when already at the source's head commit;
 # on any failure the previous mirror is kept untouched.
 _task_skills_sync(){
-  local src="$1" key root sha stage files mode path out
-  key="$(_task_key_from_repo "$src")"; root="$(_task_skills_dir)/$key"
-  sha="$(gh api "repos/$src/commits/HEAD" --jq .sha 2>/dev/null)" || { echo "task: skill source $src unreachable — keeping the current copy." >&2; return 1; }
-  [ -f "$root/.commit" ] && [ "$(<"$root/.commit")" = "$sha" ] && return 0
+  local src="$1" key root sha stage files mode path out n=0 total tty=0
+  key="$(_task_key_from_repo "$src")"; root="$(_task_skills_dir)/$key"; [ -t 2 ] && tty=1
+  # progress on stderr: a live line on a terminal (redrawn in place), nothing extra otherwise
+  [ "$tty" = 1 ] && printf '\033[2mtask: skills — checking %s…\033[0m' "$src" >&2
+  sha="$(gh api "repos/$src/commits/HEAD" --jq .sha 2>/dev/null)" || { [ "$tty" = 1 ] && printf '\r\033[K' >&2; echo "task: skill source $src unreachable — keeping the current copy." >&2; return 1; }
+  if [ -f "$root/.commit" ] && [ "$(<"$root/.commit")" = "$sha" ]; then
+    [ "$tty" = 1 ] && printf '\r\033[K' >&2; echo "task: skills from $src up to date (${sha:0:7})." >&2; return 0; fi
   mkdir -p "$(_task_skills_dir)"; stage="$(mktemp -d "$(_task_skills_dir)/.sync.XXXXXX")" || return 1
   files="$(gh api "repos/$src/git/trees/$sha?recursive=1" \
     --jq '.tree[] | select(.type == "blob" and (.path | startswith("skills/"))) | "\(.mode) \(.path)"' 2>/dev/null)"
-  [ -n "$files" ] || { echo "task: no skills/ folder in $src." >&2; rm -rf "$stage"; return 1; }
+  [ -n "$files" ] || { [ "$tty" = 1 ] && printf '\r\033[K' >&2; echo "task: no skills/ folder in $src." >&2; rm -rf "$stage"; return 1; }
+  total="$(grep -c . <<< "$files")"
   while read -r mode path; do
+    n=$((n+1)); [ "$tty" = 1 ] && printf '\r\033[K\033[2mtask: skills — downloading %s  %d/%d  %s\033[0m' "$src" "$n" "$total" "${path#skills/}" >&2
     out="$stage/${path#skills/}"; mkdir -p "$(dirname "$out")"
     gh api "repos/$src/contents/$path?ref=$sha" -H "Accept: application/vnd.github.raw" > "$out" 2>/dev/null \
-      || { echo "task: download failed ($src/$path) — keeping the current copy." >&2; rm -rf "$stage"; return 1; }
+      || { [ "$tty" = 1 ] && printf '\r\033[K' >&2; echo "task: download failed ($src/$path) — keeping the current copy." >&2; rm -rf "$stage"; return 1; }
     [ "$mode" = 100755 ] && chmod +x "$out"
   done <<< "$files"
   printf '%s\n' "$src" > "$stage/.source"; printf '%s\n' "$sha" > "$stage/.commit"
   rm -rf "$root.old"; [ -e "$root" ] && mv "$root" "$root.old"; mv -T "$stage" "$root"; rm -rf "$root.old" "$stage"
-  echo "task: skills from $src synced (${sha:0:7})." >&2
+  [ "$tty" = 1 ] && printf '\r\033[K' >&2; echo "task: skills from $src synced (${sha:0:7}, $total files)." >&2
 }
 
 # Catalog entries "<owner-repo>/<name>", one per line, for the configured sources.
@@ -611,6 +621,10 @@ _task_skills_catalog(){ local src key d
 _task_skills_sync_for(){ local s k src; local -A done_=()
   for s in $(_task_cfg "skills.$1"); do k="${s%%/*}"; [ -n "${done_[$k]+x}" ] && continue; done_[$k]=1
     src="$(cat "$(_task_skills_dir)/$k/.source" 2>/dev/null)"; [ -n "$src" ] && _task_skills_sync "$src"
+  done
+  # a ticked skill that vanished upstream (renamed/removed) would silently not load → say so
+  for s in $(_task_cfg "skills.$1"); do [ -f "$(_task_skills_dir)/$s/SKILL.md" ] \
+    || echo "task: ⚠ skill '${s#*/}' is no longer in its source (renamed or removed?) — re-tick in 'task settings' → skills." >&2
   done; return 0; }
 
 # settings → skills: tick skills per repo, add/remove sources.
