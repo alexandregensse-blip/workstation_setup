@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # workstation_setup — single, idempotent installer. CONTAINER-ONLY model:
 # the host is left in its initial state as much as possible. The whole AI toolchain
-# (Claude Code, Serena, rtk, uv, python, ripgrep) and all config (~/.claude, hooks)
+# (Claude Code, rtk, uv, python, ripgrep; Serena opt-in per repo) and all config (~/.claude, hooks)
 # live ONLY inside the Docker image and the self-contained <workspace>/.workstation dir.
 # The host gets just: docker + git + gh (installed only if missing, and recorded so
 # uninstall.sh can offer to remove exactly those), plus the `task` command in ~/.bashrc.
@@ -332,7 +332,7 @@ banner "Workstation installed successfully"
 cat <<EOF
 
 Inside the container (the 'workstation' image):
-  Claude Code · Serena MCP · rtk (hooks pre-wired) · uv · git · gh · ripgrep · python3 · jq
+  Claude Code · rtk (hooks pre-wired) · uv · git · gh · ripgrep · python3 · jq
 
 Locations:  workstation: $WS_DIR    workspace: $WS_HOME    task clones: $WS_RUNNING
 

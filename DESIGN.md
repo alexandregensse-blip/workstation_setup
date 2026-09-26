@@ -7,7 +7,7 @@ For the quick start, see [README.md](README.md).
 
 A **portable workstation**: one command sets up a fresh Ubuntu machine to run Claude Code work
 as **isolated, disposable Docker containers** via a `task` command. **Container-only**: the AI
-toolchain (Claude Code, Serena MCP, rtk, uv) and all config live **only inside the image and a
+toolchain (Claude Code, rtk, uv; Serena MCP opt-in per repo) and all config live **only inside the image and a
 self-contained `<workspace>/.workstation` dir** — the host is left in its initial state.
 
 ## 2. Mental model
@@ -31,14 +31,14 @@ self-contained `<workspace>/.workstation` dir** — the host is left in its init
 | `install.sh` | One-command, idempotent installer (container-only). |
 | `uninstall.sh` | Reverses it, asking **point-by-point**, then recaps (see §13). |
 | `update.sh` | Pulls latest + rebuilds the image (see §12). |
-| `Dockerfile.base` | The heavy **`workstation-base`** image — the toolchain (Claude/Serena/rtk/uv + apk tools), built once and reused. |
+| `Dockerfile.base` | The heavy **`workstation-base`** image — the toolchain (Claude/rtk/uv + apk tools), built once and reused. |
 | `Dockerfile` | The thin **`workstation`** image (`FROM workstation-base`) — bakes config/hooks; rebuilt on changes. |
 | `<ws>/toolchains/<key>/Dockerfile` | Optional **per-repo** toolchains (host-side, not committed) → image `workstation-<key>` (`FROM workstation`). Built on demand by `task toolchain` / the next task (see §7). |
 | `shell/task.sh` | The `task` shell function, **sourced straight from the clone**. |
 | `shell/build-progress.sh` | Shared live build meter (`_ws_build_meter`), sourced by `task.sh` + `update.sh`. |
 | `.github/workflows/shellcheck.yml` | CI lint (shellcheck) over the shell scripts; signal-only. |
-| `claude/CLAUDE.md` | Global code-exploration policy (Serena). Baked into the image at `~/.claude/CLAUDE.md`. |
-| `claude/settings.json` | Claude prefs **+ hooks** (Serena + rtk). Baked into the image. No hardcoded language. |
+| `serena/` | The **opt-in** Serena layer: `Dockerfile` (appended to a repo's image when `serena` is on for it), `CLAUDE.md` (code-exploration policy) and `hooks.json`. Policy + hooks ship inert in the image; see §9. |
+| `claude/settings.json` | Claude prefs **+ hooks** (rtk, WhatsApp notifier). Baked into the image. No hardcoded language. |
 | `claude/statusline.sh` | Custom status line. Baked into the image. |
 | `dev/CLAUDE.md` | Multi-repo working convention. Baked into the image. |
 | `README.md` / `DESIGN.md` | Quick start / this reference. |
@@ -49,8 +49,10 @@ The dotfiles are **deployed into the image only** — never copied to the host.
 
 - **Claude Code** — the agent CLI (native installer, glibc binary).
 - **Serena** (`serena-agent`, MIT) — semantic code MCP server (LSP-based), free for commercial use.
+  **Opt-in per repo** (`task settings` → `serena`), NOT in the shared image: installed only in the
+  images of repos that turn it on.
 - **rtk** (`rtk-ai/rtk`, MIT) — token-saving CLI proxy; hooks into Claude's Bash tool.
-- **uv** — installs Serena and its standalone Python.
+- **uv** — Python tooling (and installs Serena where it's enabled).
 - **gh**, **git**, **ripgrep**, **jq**, **python3** — image tools.
 
 On the **host**, only `docker`, `git`, `gh` are required (git/gh for cloning + the GitHub token;
@@ -195,7 +197,7 @@ task auth [<name> | rm <name>]                # manage Claude logins (independen
 - **GNU userland**: grep/sed/gawk/coreutils/findutils/diffutils/util-linux/flock/gzip/patch/procps are
   installed so in-container scripts get GNU behavior (e.g. `grep --include`, `date +%s%N`), not Wolfi's
   busybox fallbacks. Added as the LAST base layer so rebuilds reuse the cached toolchain above.
-- **Wiring**: `serena setup claude-code` (MCP), `rtk init -g --no-patch` (RTK.md only), and a
+- **Wiring**: `rtk init -g --no-patch` (RTK.md only), and a
   git credential helper (`!gh auth git-credential`) so in-container `git push` uses `GH_TOKEN`.
 
 On-disk image ≈ **830 MB** (Claude Code alone ~234 MB).
@@ -272,21 +274,32 @@ network with flaky DNS, the `dns` feature (`task settings`) makes `task` pass th
 
 | Event | Command | Purpose |
 |---|---|---|
-| SessionStart | `serena-hooks activate` | activate the project + read Serena's instructions |
-| PreToolUse (all) | `serena-hooks remind` | nudge the agent to use Serena over read/grep |
-| PreToolUse (all) | `serena-hooks auto-approve` | auto-approve Serena tool calls in permissive mode |
 | PreToolUse (Bash) | `rtk hook claude` | rewrite Bash commands to save tokens |
-| SessionEnd | `serena-hooks cleanup` | clear the session's hook data |
 
 These are committed in `settings.json` (not generated), so they survive rebuilds and rtk never
 overwrites them.
+
+**Serena hooks (opt-in, `serena/hooks.json`)** — only for repos with `serena = on`:
+
+| Event | Command | Purpose |
+|---|---|---|
+| SessionStart | `serena-hooks activate` | activate the project + read Serena's instructions |
+| PreToolUse (all) | `serena-hooks remind` | nudge the agent to use Serena over read/grep |
+| PreToolUse (all) | `serena-hooks auto-approve` | auto-approve Serena tool calls in permissive mode |
+| SessionEnd | `serena-hooks cleanup` | clear the session's hook data |
+
+`task` composes the repo's image as its toolchain spec + `serena/Dockerfile`, which installs Serena,
+registers its MCP, appends the policy to `~/.claude/CLAUDE.md` and drops `~/.claude/serena-hooks.json`.
+At launch, when that file exists, its hooks are merged into the session's `--settings`. Turning
+`serena` on or off changes the composed spec, so the repo image rebuilds on the next task.
 
 ## 10. Key design decisions
 
 - **Container-only / host left clean** — the AI toolchain and config never touch the host; they
   live in the image and in `<workspace>/.workstation`. Only docker/git/gh may be installed, and
   they're tracked for a precise, point-by-point uninstall.
-- **Serena (MIT) for code intelligence** — LSP-based semantic MCP, free for commercial use.
+- **Serena (MIT) for code intelligence, opt-in per repo** — LSP-based semantic MCP, free for
+  commercial use; not every repo runs it well, so it's off unless a repo turns it on.
 - **Wolfi base** — minimal, glibc, near-zero CVEs.
 - **Container per task** — strong isolation (filesystem/process/network) and a fit for the
   multi-agent model.
@@ -313,7 +326,7 @@ overwrites them.
 `git pull`s the clone, then rebuilds **only what the pull actually changed** — the base if
 `Dockerfile.base` moved, the thin image if config moved, or **nothing** if only docs/scripts
 changed. `--fresh` forces a from-scratch base (`--pull --no-cache`) to fetch the
-latest Claude/Serena/rtk. Output is concise (git's transfer noise is suppressed). Flags: `--dir`,
+latest Claude/rtk. Output is concise (git's transfer noise is suppressed). Flags: `--dir`,
 `--home`, `--fresh`, `--yes`. `task` is sourced from the clone, so a shell change is applied by
 `source ~/.bashrc` (or a new terminal).
 

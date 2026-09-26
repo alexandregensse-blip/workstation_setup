@@ -79,7 +79,7 @@ _task_cfg_set(){
 }
 
 # Settings that support a PER-REPO override ('<key>.<repokey>' wins over the global '<key>').
-_task_setting_perrepo(){ case "$1" in ram|cpus|claude_mode|claude_effort|claude_model) return 0 ;; *) return 1 ;; esac; }
+_task_setting_perrepo(){ case "$1" in ram|cpus|claude_mode|claude_effort|claude_model|serena) return 0 ;; *) return 1 ;; esac; }
 # Read a setting honoring that override: the per-repo value (if set) else the global. $2 = repokey.
 _task_cfg_r(){ local v; v="$(_task_cfg "$1.$2")"; [ -n "$v" ] && { printf '%s' "$v"; return 0; }; _task_cfg "$1"; }
 # Candidate repokeys to offer when scoping a per-repo setting: repos with a toolchain, repos with a
@@ -442,11 +442,12 @@ _task_cleanup(){
 # settings: show + edit optional features. Stored in <ws>/.config (NOT host env), applied to the next
 # task. Features: notify (terminal bell), lang, theme, dns, and the Claude launch defaults.
 # The editable feature keys, in display order.
-_task_setting_keys(){ printf '%s\n' skills notify memory lang theme statusline dns cpus ram claude_mode claude_model claude_effort; }
+_task_setting_keys(){ printf '%s\n' skills serena notify memory lang theme statusline dns cpus ram claude_mode claude_model claude_effort; }
 
 # One-line hint shown for a setting (allowed values / format + what "clear" means).
 _task_setting_hint(){ case "$1" in
   skills)        echo 'skills from GitHub sources (owner/repo with a skills/ folder), ticked per repo' ;;
+  serena)        echo 'on = add the Serena code MCP to the repo image (built on the next task) · off/clear = no Serena (default)' ;;
   notify)        echo 'terminal_bell (local bell+flash) · whatsapp (ping a dedicated group on your phone) · both = "terminal_bell,whatsapp" · clear = off' ;;
   memory)        echo 'repo (per-repo, default) · global (all repos) · off (per task)' ;;
   lang)          echo 'Claude UI language code, e.g. fr / en / pt-BR · clear = Claude default' ;;
@@ -466,6 +467,7 @@ _task_setting_validate(){
   local k="$1" v="$2" t; _TASK_SETTING_ERR=""
   case "$k" in
     notify)        case "$v" in terminal_bell|whatsapp|terminal_bell,whatsapp|whatsapp,terminal_bell) return 0 ;; *) _TASK_SETTING_ERR="notify: terminal_bell | whatsapp | terminal_bell,whatsapp (clear with \"-\")";; esac ;;
+    serena)        case "$v" in on|off) return 0 ;; *) _TASK_SETTING_ERR="serena must be: on | off";; esac ;;
     memory)        case "$v" in repo|global|off) return 0 ;; *) _TASK_SETTING_ERR="memory must be: repo | global | off";; esac ;;
     statusline)    case "$v" in off) return 0 ;; *) _TASK_SETTING_ERR="statusline only takes 'off' (clear with \"-\" to re-enable)";; esac ;;
     claude_mode)   case "$v" in auto|acceptEdits|bypassPermissions|default) return 0 ;; *) _TASK_SETTING_ERR="mode must be: auto | acceptEdits | bypassPermissions | default";; esac ;;
@@ -490,13 +492,14 @@ _task_setting_show(){ local v
     printf '%s source(s) · %s repo(s)' "$ns" "${nr:-0}"; return 0; fi
   v="$(_task_cfg "$1")"
   if [ -n "$v" ]; then printf '%s' "$v"; else case "$1" in
-    memory) printf 'repo (default)' ;; notify) printf 'off' ;; cpus) printf '2 (default)' ;; ram) printf '4g (default)' ;; *) printf '—' ;; esac; fi
+    memory) printf 'repo (default)' ;; notify|serena) printf 'off' ;; cpus) printf '2 (default)' ;; ram) printf '4g (default)' ;; *) printf '—' ;; esac; fi
   if _task_setting_perrepo "$1"; then local n; n="$(grep -cE "^$1\.[a-z0-9._-]+=" "$(_task_cfg_file)" 2>/dev/null)"; [ "${n:-0}" -gt 0 ] && printf ' · %s repo(s)' "$n"; fi; }
 
 # Pickable value choices for a setting, one per line as "<stored-value>|<label>" (empty value =
 # clear/default). Returns 1 for free-form settings (lang/model/dns), which are typed instead.
 _task_setting_choices(){ case "$1" in
   notify)        printf '%s\n' 'terminal_bell|terminal_bell — local bell + flash' 'whatsapp|whatsapp — ping a dedicated group on your phone' 'terminal_bell,whatsapp|both — local bell + WhatsApp' '|off — no notification' ;;
+  serena)        printf '%s\n' 'on|on — Serena code MCP in the repo image' 'off|off — no Serena' '|— unset (off)' ;;
   memory)        printf '%s\n' 'repo|repo — per-repo memory (default)' 'global|global — shared across all repos' 'off|off — ephemeral, per task' ;;
   statusline)    printf '%s\n' '|default — keep the status line' 'off|off — hide it' ;;
   theme)         printf '%s\n' 'dark|dark' 'light|light' 'dark-daltonized|dark-daltonized' 'light-daltonized|light-daltonized' '|— unset (default)' ;;
@@ -882,15 +885,29 @@ _task_repo_key(){
 # 'workstation-<key>' (FROM workstation — the shared image is the base) and runs that repo's tasks
 # with it; repos without a spec use the plain 'workstation' image. So one repo's toolchains never
 # bloat another. The 'FROM workstation' line is prepended automatically (don't write your own FROM).
+# The opt-in Serena layer (serena/Dockerfile, 'task settings' → serena) is appended the same way.
 _task_toolchain_dir(){ printf '%s' "$(_task_wsdir)/toolchains/$1"; }
 
-# Is 'workstation-<key>' built AND current — i.e. the image exists, the Dockerfile hasn't changed
-# since (mtime vs the .image-base stamp), and it was built against today's 'workstation' base id?
+# The composed build spec for key $1: its toolchain Dockerfile (with 'FROM workstation' prepended when
+# it has no FROM) + the Serena layer when 'serena' is on for this repo. Empty → plain 'workstation'.
+_task_repo_spec(){
+  local key="$1" df sf tc=0 sr=0; df="$(_task_toolchain_dir "$key")/Dockerfile"; sf="$(_task_wsdir)/serena/Dockerfile"
+  [ -f "$df" ] && tc=1
+  [ "$(_task_cfg_r serena "$key")" = on ] && [ -f "$sf" ] && sr=1
+  [ "$tc$sr" = 00 ] && return 0
+  if [ "$tc" = 1 ]; then grep -qiE '^[[:space:]]*FROM[[:space:]]' "$df" || echo "FROM workstation"; cat "$df"
+  else echo "FROM workstation"; fi
+  [ "$sr" = 1 ] && cat "$sf"
+  return 0
+}
+
+# Is 'workstation-<key>' built AND current — i.e. the image exists, it was built from spec $2 (the
+# composed spec saved in .image-spec) and against today's 'workstation' base id (.image-base)?
 _task_image_fresh(){
-  local key="$1" tdir df stamp img dock baseid curid
-  tdir="$(_task_toolchain_dir "$key")"; df="$tdir/Dockerfile"; stamp="$tdir/.image-base"; img="workstation-$key"; dock="$(_task_dock)"
+  local key="$1" spec="$2" tdir stamp img dock baseid curid
+  tdir="$(_task_toolchain_dir "$key")"; stamp="$tdir/.image-base"; img="workstation-$key"; dock="$(_task_dock)"
   $dock image inspect "$img" >/dev/null 2>&1 || return 1
-  [ "$df" -nt "$stamp" ] && return 1
+  [ "$(cat "$tdir/.image-spec" 2>/dev/null)" = "$spec" ] || return 1
   baseid="$($dock image inspect -f '{{.Id}}' workstation 2>/dev/null || true)"
   curid="$(cat "$stamp" 2>/dev/null || true)"
   [ -n "$baseid" ] && [ "$curid" = "$baseid" ]
@@ -916,15 +933,16 @@ _task_build_lock_acquire(){
 _task_build_lock_release(){ rm -f "$(_task_build_lock_file "$1")" 2>/dev/null; }
 
 # Ensure 'workstation-<key>' is built and current; echo the image name to use. Rebuilds lazily when
-# the image is missing, the Dockerfile changed, or the base 'workstation' image moved (so an
-# `update.sh` self-heals on the next task), serialized by a build lock so simultaneous launches build
-# once. Build output is hidden unless it fails. Returns 1 on build failure. Caller falls back to
-# plain 'workstation' when there's no spec.
+# the image is missing, the composed spec changed (toolchain edited, Serena toggled), or the base
+# 'workstation' image moved (so an `update.sh` self-heals on the next task), serialized by a build
+# lock so simultaneous launches build once. Build output is hidden unless it fails. Returns 1 on build
+# failure. No spec (no toolchain, Serena off) → plain 'workstation'.
 _task_ensure_repo_image(){
-  local key="$1" tdir img df stamp dock; tdir="$(_task_toolchain_dir "$key")"
-  df="$tdir/Dockerfile"; stamp="$tdir/.image-base"; img="workstation-$key"; dock="$(_task_dock)"
-  [ -f "$df" ] || { printf 'workstation'; return 0; }        # no spec → shared image
-  _task_image_fresh "$key" && { printf '%s' "$img"; return 0; }
+  local key="$1" tdir img spec stamp dock; tdir="$(_task_toolchain_dir "$key")"
+  stamp="$tdir/.image-base"; img="workstation-$key"; dock="$(_task_dock)"
+  spec="$(_task_repo_spec "$key")"
+  [ -n "$spec" ] || { printf 'workstation'; return 0; }      # no spec → shared image
+  _task_image_fresh "$key" "$spec" && { printf '%s' "$img"; return 0; }
 
   # Need a (re)build. Serialize: first to grab the lock builds; the others WAIT then reuse. While
   # waiting, animate a single in-place line (cycling dots + elapsed) so it's clearly alive, not stuck,
@@ -933,7 +951,7 @@ _task_ensure_repo_image(){
   { true >/dev/tty; } 2>/dev/null && [ -t 2 ] && anim=1
   [ "$anim" = 1 ] && printf '\033[?25l' >&2
   while ! _task_build_lock_acquire "$key"; do
-    if [ $(( n % 6 )) -eq 0 ] && _task_image_fresh "$key"; then                # someone else finished it
+    if [ $(( n % 6 )) -eq 0 ] && _task_image_fresh "$key" "$spec"; then                # someone else finished it
       [ "$anim" = 1 ] && printf '\r\033[K\033[?25h' >&2; printf '%s' "$img"; return 0
     fi
     if [ "$anim" = 1 ]; then
@@ -946,16 +964,15 @@ _task_ensure_repo_image(){
     fi
   done
   [ "$anim" = 1 ] && printf '\r\033[K\033[?25h' >&2
-  if _task_image_fresh "$key"; then _task_build_lock_release "$key"; printf '%s' "$img"; return 0; fi
+  if _task_image_fresh "$key" "$spec"; then _task_build_lock_release "$key"; printf '%s' "$img"; return 0; fi
 
-  echo "task: building repo toolchain image '$img' (first run / spec or base changed)…" >&2
-  local log rc=0 baseid fromline=""; log="$(mktemp)"
+  echo "task: building repo image '$img' (first run / toolchain, Serena or base changed)…" >&2
+  local log rc=0 baseid; log="$(mktemp)"; mkdir -p "$tdir"          # tdir = build context
   baseid="$($dock image inspect -f '{{.Id}}' workstation 2>/dev/null || true)"
-  grep -qiE '^[[:space:]]*FROM[[:space:]]' "$df" || fromline="FROM workstation"
-  { [ -n "$fromline" ] && echo "$fromline"; cat "$df"; } | $dock build -t "$img" -f - "$tdir" >"$log" 2>&1 &
+  printf '%s\n' "$spec" | $dock build -t "$img" -f - "$tdir" >"$log" 2>&1 &
   if declare -F _ws_build_meter >/dev/null 2>&1; then _ws_build_meter "$log" "$!" "  building $img · " || rc=$?
   else wait "$!" || rc=$?; fi
-  if [ "$rc" = 0 ]; then printf '%s' "$baseid" > "$stamp"
+  if [ "$rc" = 0 ]; then printf '%s' "$baseid" > "$stamp"; printf '%s' "$spec" > "$tdir/.image-spec"
   else echo "task: toolchain image build FAILED for '$img' — last lines:" >&2; tail -25 "$log" >&2; fi
   rm -f "$log"; _task_build_lock_release "$key"
   [ "$rc" = 0 ] && printf '%s' "$img"; return "$rc"
@@ -1247,6 +1264,8 @@ _task_run(){
         | (if \$t != \"\" then .theme = \$t else . end)
         | (if \$s == \"off\" then .statusLine = null else . end)
         | (if \$m != \"\" then .autoMemoryDirectory = \$m else . end)" 2>/dev/null)"
+      # Serena layer present (repo opted in) → merge its hooks into the session settings
+      [ -f /home/dev/.claude/serena-hooks.json ] && S="$(jq -cn --argjson a "${S:-null}" --slurpfile h /home/dev/.claude/serena-hooks.json "(\$a // {}) * \$h[0]" 2>/dev/null || printf "%s" "$S")"
       [ -n "$S" ] && [ "$S" != "{}" ] && set -- --settings "$S" "$@"
       [ -n "${WORKSTATION_TAB_TITLE:-}" ] && printf "\033]0;%s\a" "$WORKSTATION_TAB_TITLE"   # short tab title (Claude may update it later)
       exec claude "$@"' _ "${cflags[@]}")
@@ -1276,6 +1295,8 @@ _task_run(){
         | (if \$t != \"\" then .theme = \$t else . end)
         | (if \$s == \"off\" then .statusLine = null else . end)
         | (if \$m != \"\" then .autoMemoryDirectory = \$m else . end)" 2>/dev/null)"
+      # Serena layer present (repo opted in) → merge its hooks into the session settings
+      [ -f /home/dev/.claude/serena-hooks.json ] && S="$(jq -cn --argjson a "${S:-null}" --slurpfile h /home/dev/.claude/serena-hooks.json "(\$a // {}) * \$h[0]" 2>/dev/null || printf "%s" "$S")"
       [ -n "$S" ] && [ "$S" != "{}" ] && set -- --settings "$S" "$@"
       [ -n "${WORKSTATION_TAB_TITLE:-}" ] && printf "\033]0;%s\a" "$WORKSTATION_TAB_TITLE"   # short tab title (Claude may update it later)
       exec claude "$@"' _ "${cflags[@]}")

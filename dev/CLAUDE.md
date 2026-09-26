@@ -1,6 +1,5 @@
 # ~/dev — multi-repo working convention
 
-> Complements the global policy (`~/.claude/CLAUDE.md`, Serena-oriented).
 > Here: multi-repo / multi-session handling.
 
 ## Principle
@@ -22,7 +21,6 @@ A task folder can be deleted at any time WITHOUT loss as long as everything is o
    ```
 
 3. **Branch**: `cd` in → `git switch -c task/<slug>` → `git push -u origin task/<slug>`.
-   Activate the project in Serena (`activate_project` / `--project-from-cwd`).
 
 4. **Work**, pushing at every finished and correct step.
 

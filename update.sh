@@ -9,7 +9,7 @@
 #   --dir  <path>  (WORKSTATION_DIR)   where the workstation lives  [auto-detected from ~/.bashrc, else ~/dev/.workstation]
 #   --home <path>  (WORKSTATION_HOME)  workspace root               [default ~/dev]
 #   --fresh                            force a from-scratch base rebuild (--pull --no-cache) to pull the
-#                                      latest Claude/Serena/rtk, even if the repo didn't change
+#                                      latest Claude/rtk, even if the repo didn't change
 #   --yes | -y                         non-interactive
 # Execute this, don't source it (it uses set -e/exit). If sourced, bail out safely before set -e.
 if (return 0 2>/dev/null); then echo "Don't 'source' update.sh — run it as a script." >&2; return 1; fi
@@ -81,7 +81,7 @@ if [ "$needs_base" = 0 ] && [ "$needs_thin" = 0 ]; then
   [ "$before" != "$after" ] && echo "No image rebuild needed."
 else
   if [ "$needs_base" = 1 ]; then
-    [ "$FRESH" = 1 ] && echo "Rebuilding base image — FRESH, latest Claude/Serena/rtk (a few minutes)…" \
+    [ "$FRESH" = 1 ] && echo "Rebuilding base image — FRESH, latest Claude/rtk (a few minutes)…" \
                      || echo "Rebuilding base image (a few minutes)…"
     if [ "$FRESH" = 1 ]; then qbuild --pull --no-cache -f "$WS_DIR/Dockerfile.base" -t workstation-base "$WS_DIR" || exit 1
     else                      qbuild -f "$WS_DIR/Dockerfile.base" -t workstation-base "$WS_DIR" || exit 1; fi

@@ -2,7 +2,7 @@
 
 Portable workstation. On a fresh machine (Ubuntu), **one command** sets up Claude Code work as
 **isolated Docker sessions** and adds the `task` command. **Container-only**: the whole AI toolchain
-(Claude Code, Serena MCP, rtk, uv) and all config live inside the image and a self-contained
+(Claude Code, rtk, uv — Serena MCP opt-in per repo) and all config live inside the image and a self-contained
 `<workspace>/.workstation` dir — **the host is left in its initial state** (only docker + git + gh,
 installed if missing). No machine-specific absolute paths.
 
@@ -16,7 +16,7 @@ curl -fsSL https://raw.githubusercontent.com/alexandregensse-blip/workstation_se
 
 It asks where to put your workspace (current dir / `~/dev` / custom), installs **only the missing**
 host prerequisites (`docker`, `git`, `gh`), clones itself into `<workspace>/.workstation`, **builds
-the Docker image** (which bakes Claude/Serena/rtk + hooks + your dotfiles), adds `task` to your
+the Docker image** (which bakes Claude/rtk + hooks + your dotfiles), adds `task` to your
 `.bashrc`, runs GitHub + Claude auth, and prints a confirmation.
 
 The trailing **`&& source ~/.bashrc`** runs in your *current* shell (it's not part of the pipe), so
@@ -55,8 +55,8 @@ restarting docker. It's **recorded** so `uninstall.sh` reverts it, and you can s
 `--no-ipv6`. See [Networking](#networking-ipv6).
 
 **Inside the Docker image** (Wolfi / `apk`): `bash`, `curl`, `git`, `ripgrep`, `python3`, `gh`, `jq`,
-`shadow`, `ca-certificates`, plus `uv`, Claude Code, **Serena**, **rtk** — and the baked config
-(settings + Serena/rtk hooks + policy + statusline).
+`shadow`, `ca-certificates`, plus `uv`, Claude Code, **rtk** — and the baked config
+(settings + rtk hooks + statusline). **Serena** is added per repo, only where it's turned on.
 
 ## Work
 
@@ -79,7 +79,7 @@ task help                        # full help (also shown for: task with no args)
 ```
 
 Clones on the host (under `running/`), branches `task/<slug>`, then runs Claude in a **disposable
-container** (Serena connected, auth mounted). On exit: container destroyed, clone kept on the host.
+container** (auth mounted). On exit: container destroyed, clone kept on the host.
 
 **Session persistence & resume** — each task keeps its Claude conversation history on the host inside
 the clone's own `.git/claude-projects` (out of the worktree, never committed, removed with the clone).
@@ -221,6 +221,13 @@ WORKSTATION_CLAUDE_MODEL=sonnet task autodev quick-experiment
 task settings       # set  memory = repo (default) | global | off
 ```
 
+**Give a repo Serena (semantic code MCP)** — off by default, added to that repo's image only:
+```bash
+task settings       # serena → "un repo précis…" → pick the repo → on   (or global → on)
+```
+The repo's image is rebuilt on its next task with Serena installed, its MCP registered, its policy and
+hooks wired in. Set it back to off (or clear it) and the next task runs without Serena.
+
 **Give a repo's tasks extra skills** (from any GitHub repo with a `skills/<name>/SKILL.md` layout, private OK):
 ```bash
 task settings       # skills → add a source (owner/repo), then pick a repo and tick its skills
@@ -280,7 +287,7 @@ task auth rm work         # remove one
 ## Preferences
 
 If a Claude install is found on the machine, install offers to **import your local preferences**
-(statusline, language, theme, …). It merges them with the workstation's own Serena/rtk hooks
+(statusline, language, theme, …). It merges them with the workstation's own rtk hooks
 (host `permissions`/`enabledPlugins` are dropped) into `<workspace>/.workstation/.claude/` and
 mounts them read-only into task containers — the host `~/.claude` is only read. Force with
 `--import-prefs` / `--no-import-prefs`.
@@ -333,7 +340,7 @@ image if config moved, or **nothing** if only docs/scripts changed (no rebuild f
 show a **live one-line meter** (current step · downloaded · rate · elapsed); docker's full
 step-by-step output is hidden and only shown if a build fails.
 `--fresh` forces a from-scratch base (`--pull --no-cache`) to fetch
-the latest Claude/Serena/rtk. The trailing `&& source ~/.bashrc` reloads `task` in your current
+the latest Claude/rtk. The trailing `&& source ~/.bashrc` reloads `task` in your current
 shell if it changed — running the script is a child process, so it can't do that by itself.
 
 ## Uninstall
