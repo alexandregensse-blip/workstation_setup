@@ -68,7 +68,7 @@ needs_base=0; needs_thin=0; task_changed=0
 while IFS= read -r f; do [ -z "$f" ] && continue
   case "$f" in
     Dockerfile.base)            needs_base=1 ;;                          # toolchain layer
-    Dockerfile|claude/*|dev/*)  needs_thin=1 ;;                          # config layer
+    Dockerfile|claude/*|dev/*|serena/*) needs_thin=1 ;;                   # config layer
     shell/*)                    task_changed=1 ;;                        # shell function + its helpers (no rebuild)
   esac
 done <<< "$changed"
