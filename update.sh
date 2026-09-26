@@ -17,7 +17,9 @@ set -euo pipefail
 
 WS_DIR="${WORKSTATION_DIR:-}"
 WS_HOME="${WORKSTATION_HOME:-$HOME/dev}"
+# shellcheck disable=SC2034  # -y is accepted (so scripted calls don't break) but nothing prompts yet
 FRESH=0; ASSUME_YES=0
+# shellcheck disable=SC2034
 
 while [ $# -gt 0 ]; do
   case "$1" in

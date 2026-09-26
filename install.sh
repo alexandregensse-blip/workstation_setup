@@ -262,16 +262,16 @@ printf '\n\033[1;36m== building (no more questions) ==\033[0m\n\n'; ck_render
 
 # 0. base image (toolchain — built once, then reused)
 ck_set 0 doing
-if dock image inspect workstation-base >/dev/null 2>&1; then ck_set 0 done "present (no re-download)"
+if dock image inspect workstation-base >/dev/null 2>&1; then ck_set 0 "done" "present (no re-download)"
 else build_phase 0 "$WS_DIR/.dl-base" -f "$REPO_DIR/Dockerfile.base" -t workstation-base "$REPO_DIR" || { echo "⚠ base build failed — see above."; exit 1; }
-     ck_set 0 done "built"; fi
+     ck_set 0 "done" "built"; fi
 
 # 1. workstation image (config on top of the base)
 ck_set 1 doing
 if ! dock image inspect workstation >/dev/null 2>&1; then
   build_phase 1 "$WS_DIR/.dl-image" -t workstation "$REPO_DIR" || { echo "⚠ image build failed — see above."; exit 1; }
-  ck_set 1 done "built"
-else ck_set 1 done "up to date"; fi
+  ck_set 1 "done" "built"
+else ck_set 1 "done" "up to date"; fi
 
 # 2. import preferences (apply the earlier decision; needs the image's jq)
 ck_set 2 doing
@@ -292,8 +292,8 @@ if [ "$IMPORT_PREFS" = 1 ] && [ -f "$HOME/.claude/settings.json" ]; then
       'jq "{hasCompletedOnboarding,lastOnboardingVersion,oauthAccount,migrationVersion,tipsHistory,theme}|with_entries(select(.value!=null))" /ws/.claude/host-dot.json > /ws/.claude/claude-keys.json' >/dev/null 2>&1 && _p="$_p + onboarding"
     rm -f "$WS_DIR/.claude/host-dot.json"
   fi
-  ck_set 2 done "$_p"
-else ck_set 2 done "skipped — image defaults"; fi
+  ck_set 2 "done" "$_p"
+else ck_set 2 "done" "skipped — image defaults"; fi
 
 # 3. task command (auto-sourced in ~/.bashrc, removable block)
 ck_set 3 doing
@@ -305,8 +305,8 @@ if ! grep -q '# >>> workstation >>>' "$HOME/.bashrc" 2>/dev/null; then
     echo "export WORKSTATION_RUNNING=\"$WS_RUNNING\""
     echo "source \"$WS_DIR/shell/task.sh\""
     echo '# <<< workstation <<<'; } >> "$HOME/.bashrc"
-  ck_set 3 done "added to ~/.bashrc"
-else ck_set 3 done "already in ~/.bashrc"; fi
+  ck_set 3 "done" "added to ~/.bashrc"
+else ck_set 3 "done" "already in ~/.bashrc"; fi
 
 # 4. Claude login — browser login into the 'default' login dir (its OWN independent token), the only
 #    post-build prompt. CLAUDE_CONFIG_DIR makes Claude write straight into the login dir.
@@ -317,9 +317,9 @@ if [ "$NEED_LOGIN" = 1 ] && [ -r /dev/tty ]; then
   echo "  Logging into Claude inside a container — open the printed URL to authorize:"
   dock run -it --rm -e CLAUDE_CONFIG_DIR=/cfg -v "$WS_DIR/.claude-slots/default:/cfg" workstation \
     bash -lc 'claude auth login' < /dev/tty || true
-  [ -f "$WS_DIR/.claude-slots/default/.credentials.json" ] && ck_set 4 done "logged in (default)" || ck_set 4 done "not logged in — run 'task auth default'"
-elif [ "$NEED_LOGIN" = 1 ]; then ck_set 4 done "no TTY — run 'task auth default' later"
-else ck_set 4 done "$CLAUDE_NOTE"; fi
+  [ -f "$WS_DIR/.claude-slots/default/.credentials.json" ] && ck_set 4 "done" "logged in (default)" || ck_set 4 "done" "not logged in — run 'task auth default'"
+elif [ "$NEED_LOGIN" = 1 ]; then ck_set 4 "done" "no TTY — run 'task auth default' later"
+else ck_set 4 "done" "$CLAUDE_NOTE"; fi
 
 # ===== final check + banner =====
 ck_dirty; echo

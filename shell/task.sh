@@ -158,6 +158,7 @@ _task_all_clones(){ local def f b; def="$(_task_base)"; f="$(_task_bases_file)"
 
 # Pretty label for a clone path: strip the default base prefix, else show ~ for $HOME, else absolute.
 _task_clone_label(){ local c="$1" def; def="$(_task_base)"
+  # shellcheck disable=SC2088  # a literal '~/' label, not a path to expand
   case "$c" in "$def"/*) printf '%s' "${c#"$def"/}" ;; "$HOME"/*) printf '~/%s' "${c#"$HOME"/}" ;; *) printf '%s' "$c" ;; esac; }
 
 # Git state of a clone $1 → "clean" (clean AND fully pushed) or "uncommitted"/"unpushed"/both.
@@ -643,7 +644,7 @@ _task_skills_settings(){
       src="${src%.git}"; src="${src#*github.com/}"
       [[ "$src" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { [ -n "$src" ] && echo "  ✗ format attendu : owner/repo" > /dev/tty; continue; }
       _task_skills_sync "$src" || continue
-      case " $(_task_cfg skills_sources) " in *" $src "*) : ;; *) _task_cfg_set skills_sources "$(printf '%s ' $(_task_cfg skills_sources) "$src" | xargs)" ;; esac
+      case " $(_task_cfg skills_sources) " in *" $src "*) : ;; *) _task_cfg_set skills_sources "$(xargs <<< "$(_task_cfg skills_sources) $src")" ;; esac
       echo "  ✓ source $src ajoutée — coche ses skills dans un repo." > /dev/tty
     elif [ "$i" -eq $((nc+2)) ]; then
       read -ra srcs <<< "$(_task_cfg skills_sources)"; [ "${#srcs[@]}" -gt 0 ] || { echo "  (aucune source)" > /dev/tty; continue; }
@@ -651,7 +652,7 @@ _task_skills_settings(){
       src="${srcs[$_TASK_SEL_IDX]}"; k="$(_task_key_from_repo "$src")"
       _task_cfg_set skills_sources "$(printf '%s\n' "${srcs[@]}" | grep -vxF "$src" | xargs)"
       while IFS= read -r rk; do [ -n "$rk" ] || continue
-        _task_cfg_set "skills.$rk" "$(printf '%s\n' $(_task_cfg "skills.$rk") | grep -v "^$k/" | xargs)"
+        _task_cfg_set "skills.$rk" "$(_task_cfg "skills.$rk" | tr -s ' \t' '\n' | grep -v "^$k/" | xargs)"
       done < <(sed -nE 's/^skills\.([a-z0-9._-]+)=.*/\1/p' "$(_task_cfg_file)" 2>/dev/null)
       rm -rf "$(_task_skills_dir)/${k:?}"
       echo "  ✓ source $src retirée (et décochée partout)." > /dev/tty
@@ -788,7 +789,7 @@ _task_auth(){
       local n="${2:-}"; [ -n "$n" ] || { echo "usage: task auth rm <name>"; return 1; }
       [ -d "$sdir/$n" ] || { echo "task: no login '$n'."; return 1; }
       _task_slot_busy "$n" && { echo "task: login '$n' is in use by a running task — exit it first."; return 1; }
-      rm -rf "$sdir/$n" "$(_task_resv_file "$n")"; echo "removed login '$n'."; return 0 ;;
+      rm -rf "${sdir:?}/$n" "$(_task_resv_file "$n")"; echo "removed login '$n'."; return 0 ;;
     '') : ;;                                              # fall through to list
     -*) echo "usage: task auth [<name> | rm <name>]"; return 1 ;;
     *)  _task_slot_login "$sub" && echo "login '$sub' ready ✓ — a task will pick it up automatically." \
@@ -970,6 +971,7 @@ _task_ensure_repo_image(){
   [ "$anim" = 1 ] && printf '\r\033[K\033[?25h' >&2
   # We hold the lock: free it if interrupted (Ctrl-C, tab closed). Runs in the $(…) subshell of the
   # caller, so these traps never touch the user's shell. kill -9 is covered by the dead-pid check.
+  # shellcheck disable=SC2064  # expand $key now: the trap may fire after this function's locals are gone
   trap "_task_build_lock_release $(printf '%q' "$key"); exit 130" INT TERM HUP
   if _task_image_fresh "$key" "$spec"; then _task_build_lock_release "$key"; trap - INT TERM HUP; printf '%s' "$img"; return 0; fi
 
@@ -1368,7 +1370,7 @@ _task_run(){
 # when ambiguous/unmatched/empty. Echoes the result on stdout (info lines go to stderr); 1 on cancel.
 _task_resolve_repo(){
   local repo="$1" orig="$1"
-  case "$repo" in */*|*://*) printf '%s\n' "$repo"; return 0 ;; esac
+  case "$repo" in */*) printf '%s\n' "$repo"; return 0 ;; esac
   local -a known=(); mapfile -t known < <(gh repo list --limit 200 --json nameWithOwner --jq '.[].nameWithOwner' 2>/dev/null)
   [ -z "$repo" ] && { _task_pick "${known[@]}"; return $?; }
   [ "${#known[@]}" -gt 0 ] || { printf '%s\n' "$repo"; return 0; }       # offline / no gh → take as-is
