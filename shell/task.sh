@@ -916,17 +916,21 @@ _task_image_fresh(){
 # Build lock for a toolchain key, so concurrent launches (e.g. resuming two tasks of the same repo at
 # once) build the image ONCE — the rest wait, then reuse. Same lock-free pure-bash mutex as the login
 # reservation: hard-link a fully-written temp onto the lock (`ln` fails if it exists). Markers live in a
-# sibling .locks dir (NOT a key dir, so they're never a Dockerfile/build context). A stale lock (>1h:
-# a build that long is broken anyway, or the holder died) is stolen so we never wedge forever.
+# sibling .locks dir (NOT a key dir, so they're never a Dockerfile/build context). The lock holds
+# "<epoch> <holder pid>": a lock whose holder is gone (killed, terminal closed) is stolen at once, and
+# any lock >1h (a build that long is broken anyway) too, so we never wedge.
 _task_build_lock_file(){ printf '%s' "$(_task_wsdir)/toolchains/.locks/$1"; }
 _task_build_lock_acquire(){
-  local l tmp at now; l="$(_task_build_lock_file "$1")"; tmp="$l.$BASHPID"
+  local l tmp c at pid now; l="$(_task_build_lock_file "$1")"; tmp="$l.$BASHPID"
   mkdir -p "$(dirname "$l")"
-  printf '%(%s)T' -1 > "$tmp" 2>/dev/null || return 1
+  printf '%(%s)T %s' -1 "$BASHPID" > "$tmp" 2>/dev/null || return 1
   if ln "$tmp" "$l" 2>/dev/null; then rm -f "$tmp"; return 0; fi
-  at="$(<"$l" 2>/dev/null)"; printf -v now '%(%s)T' -1
+  c="$(cat "$l" 2>/dev/null)"; at="${c%% *}"; pid=""; [ "$c" != "$at" ] && pid="${c#* }"
+  printf -v now '%(%s)T' -1
   case "$at" in (*[!0-9]*|'') rm -f "$tmp"; return 1 ;; esac                 # unreadable → just-claimed
-  if [ $(( now - at )) -ge 3600 ]; then rm -f "$l" 2>/dev/null               # stale → steal
+  case "$pid" in (*[!0-9]*) pid="" ;; esac                                  # old format → age rule only
+  if { [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; } || [ $(( now - at )) -ge 3600 ]; then
+    rm -f "$l" 2>/dev/null                                                  # dead holder / stale → steal
     if ln "$tmp" "$l" 2>/dev/null; then rm -f "$tmp"; return 0; fi; fi
   rm -f "$tmp"; return 1
 }
@@ -964,7 +968,10 @@ _task_ensure_repo_image(){
     fi
   done
   [ "$anim" = 1 ] && printf '\r\033[K\033[?25h' >&2
-  if _task_image_fresh "$key" "$spec"; then _task_build_lock_release "$key"; printf '%s' "$img"; return 0; fi
+  # We hold the lock: free it if interrupted (Ctrl-C, tab closed). Runs in the $(…) subshell of the
+  # caller, so these traps never touch the user's shell. kill -9 is covered by the dead-pid check.
+  trap "_task_build_lock_release $(printf '%q' "$key"); exit 130" INT TERM HUP
+  if _task_image_fresh "$key" "$spec"; then _task_build_lock_release "$key"; trap - INT TERM HUP; printf '%s' "$img"; return 0; fi
 
   echo "task: building repo image '$img' (first run / toolchain, Serena or base changed)…" >&2
   local log rc=0 baseid; log="$(mktemp)"; mkdir -p "$tdir"          # tdir = build context
@@ -974,7 +981,7 @@ _task_ensure_repo_image(){
   else wait "$!" || rc=$?; fi
   if [ "$rc" = 0 ]; then printf '%s' "$baseid" > "$stamp"; printf '%s' "$spec" > "$tdir/.image-spec"
   else echo "task: toolchain image build FAILED for '$img' — last lines:" >&2; tail -25 "$log" >&2; fi
-  rm -f "$log"; _task_build_lock_release "$key"
+  rm -f "$log"; _task_build_lock_release "$key"; trap - INT TERM HUP
   [ "$rc" = 0 ] && printf '%s' "$img"; return "$rc"
 }
 
@@ -1010,7 +1017,7 @@ _ws_wa_lock(){ local l tmp at now i; l="$(_ws_wa_dir)/.bridge.lock"; tmp="$l.$BA
   printf '%(%s)T' -1 > "$tmp" 2>/dev/null || return 1
   for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
     if ln "$tmp" "$l" 2>/dev/null; then rm -f "$tmp"; return 0; fi
-    at="$(<"$l" 2>/dev/null)"; printf -v now '%(%s)T' -1
+    at="$(cat "$l" 2>/dev/null)"; printf -v now '%(%s)T' -1
     case "$at" in ''|*[!0-9]*) : ;; *) [ $(( now - at )) -ge 30 ] && rm -f "$l" 2>/dev/null ;; esac
     sleep 0.2
   done; rm -f "$tmp"; return 1; }
@@ -1035,7 +1042,7 @@ _ws_wa_reconcile(){ local refs dock live r name at now; refs="$(_ws_wa_dir)/refs
   printf -v now '%(%s)T' -1
   for r in "$refs"/*; do [ -e "$r" ] || continue; name="$(basename "$r")"
     printf '%s\n' "$live" | grep -qxF "$name" && continue          # container alive → keep
-    at="$(<"$r" 2>/dev/null)"; case "$at" in ''|*[!0-9]*) at=0 ;; esac
+    at="$(cat "$r" 2>/dev/null)"; case "$at" in ''|*[!0-9]*) at=0 ;; esac
     [ $(( now - at )) -ge 90 ] && rm -f "$r" 2>/dev/null            # gone and past grace → prune
   done; }
 
