@@ -739,11 +739,25 @@ _task_slot_line(){ local s="$1" acct busy
 # Browser login into login $1 (its OWN independent token / account), written into the login dir via
 # CLAUDE_CONFIG_DIR. Returns 0 once .credentials.json exists. Used by 'task auth <name>' and the
 # all-busy auto-prompt below.
+# Pasting into Claude's own prompt through `docker run -it` is unreliable (the paste is dropped), so the
+# container runs WITHOUT a TTY — `claude auth login` then reads the code from stdin — and the code is read
+# HERE by a plain `read` on the host terminal, where pasting works, then fed through a FIFO.
 _task_slot_login(){
-  local sn="$1" ws_dir dock sdir; ws_dir="$(_task_wsdir)"; dock="$(_task_dock)"; sdir="$ws_dir/.claude-slots/$sn"
+  local sn="$1" ws_dir dock sdir fifo pid code; ws_dir="$(_task_wsdir)"; dock="$(_task_dock)"; sdir="$ws_dir/.claude-slots/$sn"
   mkdir -p "$sdir"
+  [ "$dock" = docker ] || sudo -v || return 1          # the run goes to the background: sudo can't prompt there
+  fifo="$(mktemp -u)"; mkfifo -m 600 "$fifo" || return 1
   echo "Logging into Claude for login '$sn' (its OWN independent token) — open the printed URL:"
-  $dock run -it --rm -e CLAUDE_CONFIG_DIR=/cfg -v "$sdir:/cfg" workstation bash -lc 'claude auth login'
+  $dock run -i --rm -e CLAUDE_CONFIG_DIR=/cfg -v "$sdir:/cfg" workstation bash -lc 'claude auth login' < "$fifo" &
+  pid=$!
+  exec 3>"$fifo"; rm -f "$fifo"
+  sleep 2; echo
+  printf 'Paste the code here (Ctrl+Shift+V), then Enter: ' > /dev/tty
+  IFS= read -r code < /dev/tty || code=""
+  code="${code//$'\e'\[200~/}"; code="${code//$'\e'\[201~/}"      # strip bracketed-paste markers
+  code="${code//[[:space:]]/}"
+  printf '%s\n' "$code" >&3; exec 3>&-
+  wait "$pid"
   [ -f "$sdir/.credentials.json" ]
 }
 
