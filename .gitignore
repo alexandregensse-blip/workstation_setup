@@ -21,6 +21,7 @@
 /gh/
 /.auth/
 /.daemon/
+/.task-claude-data/
 
 # Safety net: never commit credentials / secrets.
 .credentials.json

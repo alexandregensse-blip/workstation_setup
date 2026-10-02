@@ -335,16 +335,22 @@ _task_clone_branch(){ local d="$1" up
   done < <(git -C "$d" for-each-ref --format='%(refname:short)|%(upstream:short)' refs/heads 2>/dev/null)
   return 0; }
 
+# The clone is the only home of its Claude Code data (transcripts in .git/claude-projects, the
+# project's .claude/): copy it to <ws>/.task-claude-data/<clone path under the base> before the clone
+# goes, keeping the same names so a backup scan finds it there. Never overwrites a newer copy.
+_task_keep_claude_data(){ local d="$1" rel keep item
+  rel="${d#"$(_task_base)"/}"; [ "$rel" = "$d" ] && rel="${d#/}"
+  keep="$(_task_wsdir)/.task-claude-data/$rel"
+  for item in .git/claude-projects .claude; do
+    [ -d "$d/$item" ] || continue
+    mkdir -p "$keep/$item" && cp -a --update "$d/$item/." "$keep/$item/" || return 1
+  done; }
+
 # Remove a clone dir; if it tracks a <remote>/task/* branch, optionally drop that remote branch too.
 #   mode: ask = prompt on a TTY · yes = delete without asking · no = leave the branch (default)
 # The remote delete runs from INSIDE the clone (reusing its remote + gh auth) BEFORE the dir is gone.
-_task_remove_clone(){ local d="$1" mode="${2:-no}" rb remote branch do_remote=0 bk
-  # The clone is the only home of its Claude data (.git/claude-projects transcripts, .claude/, copies):
-  # back it up first, and keep the clone (and its remote branch) if that fails.
-  bk="$(_task_wsdir)/shell/backup-claude-data.sh"
-  if [ -x "$bk" ] && ! "$bk" --root "$d" >/dev/null; then
-    echo "      (Claude data backup failed — clone kept: $d)"; return 1
-  fi
+_task_remove_clone(){ local d="$1" mode="${2:-no}" rb remote branch do_remote=0
+  _task_keep_claude_data "$d" || { echo "      (could not set the task's Claude data aside — clone kept: $d)"; return 1; }
   rb="$(_task_clone_branch "$d")"; remote="${rb%%$'\t'*}"; branch="${rb#*$'\t'}"
   # Only consider the remote branch when it STILL exists on the remote (a merged PR may have auto-
   # deleted it, leaving just a stale local tracking ref) — verify with ls-remote before offering.
