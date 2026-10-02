@@ -338,7 +338,13 @@ _task_clone_branch(){ local d="$1" up
 # Remove a clone dir; if it tracks a <remote>/task/* branch, optionally drop that remote branch too.
 #   mode: ask = prompt on a TTY · yes = delete without asking · no = leave the branch (default)
 # The remote delete runs from INSIDE the clone (reusing its remote + gh auth) BEFORE the dir is gone.
-_task_remove_clone(){ local d="$1" mode="${2:-no}" rb remote branch do_remote=0
+_task_remove_clone(){ local d="$1" mode="${2:-no}" rb remote branch do_remote=0 bk
+  # The clone is the only home of its Claude data (.git/claude-projects transcripts, .claude/, copies):
+  # back it up first, and keep the clone (and its remote branch) if that fails.
+  bk="$(_task_wsdir)/shell/backup-claude-data.sh"
+  if [ -x "$bk" ] && ! "$bk" --root "$d" >/dev/null; then
+    echo "      (Claude data backup failed — clone kept: $d)"; return 1
+  fi
   rb="$(_task_clone_branch "$d")"; remote="${rb%%$'\t'*}"; branch="${rb#*$'\t'}"
   # Only consider the remote branch when it STILL exists on the remote (a merged PR may have auto-
   # deleted it, leaving just a stale local tracking ref) — verify with ls-remote before offering.
@@ -408,7 +414,7 @@ _task_cleanup(){
       local rb; read -r rb < /dev/tty || rb=n; case "$rb" in y|Y|yes|YES) rmode=yes ;; esac
     fi
     local removed=0
-    for d in "${picked[@]}"; do _task_remove_clone "$d" "$rmode"; echo "  removed $(_task_clone_label "$d")"; removed=$((removed+1)); done
+    for d in "${picked[@]}"; do _task_remove_clone "$d" "$rmode" && { echo "  removed $(_task_clone_label "$d")"; removed=$((removed+1)); }; done
     _task_cleanup_prune
     echo "cleanup: removed $removed (forced)."
     return 0
@@ -428,12 +434,16 @@ _task_cleanup(){
   done
   for d in "${todo[@]}"; do
     lbl="$(_task_clone_label "$d")"; state="${st[$d]}"
-    if [ "$yes" = 1 ]; then _task_remove_clone "$d" no; echo "  removed $lbl${state:+  ($state)}"; removed=$((removed+1))
+    if [ "$yes" = 1 ]; then
+      if _task_remove_clone "$d" no; then echo "  removed $lbl${state:+  ($state)}"; removed=$((removed+1)); else kept=$((kept+1)); fi
     elif [ -r /dev/tty ]; then
       if [ "$state" = clean ]; then printf '  delete %s? (clean + pushed) [y/N]: ' "$lbl"
       else                          printf '  ⚠ DISCARD %s and its %s work? [y/N]: ' "$lbl" "$state"; fi
       read -r a < /dev/tty || a=n
-      case "$a" in y|Y|yes|YES) _task_remove_clone "$d" ask; echo "    removed"; removed=$((removed+1)) ;; *) kept=$((kept+1)) ;; esac
+      case "$a" in
+        y|Y|yes|YES) if _task_remove_clone "$d" ask; then echo "    removed"; removed=$((removed+1)); else kept=$((kept+1)); fi ;;
+        *) kept=$((kept+1)) ;;
+      esac
     else kept=$((kept+1)); fi
   done
   _task_cleanup_prune
