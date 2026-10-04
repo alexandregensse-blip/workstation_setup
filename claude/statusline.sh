@@ -125,10 +125,13 @@ if [ -n "$cwd" ] && git -C "$cwd" rev-parse --is-inside-work-tree >/dev/null 2>&
 fi
 
 # --- compose with right-alignment (newline fallback) ---------------------
-# Target cols-1, never cols: filling the terminal's last column triggers
-# auto-margin wrap / ellipsis truncation, which clips the right (git) block.
+# Never fill up to cols: Claude Code allots a few columns less than the
+# terminal width (more when it shows a notification) and truncates with an
+# ellipsis, clipping the right (git) block. The status JSON doesn't give that
+# width, so keep a fixed margin.
+RIGHT_MARGIN=10
 cols=${COLUMNS:-$(tput cols 2>/dev/null || echo 80)}
-avail=$(( cols - 3 )); [ "$avail" -lt 1 ] && avail=1
+avail=$(( cols - RIGHT_MARGIN )); [ "$avail" -lt 1 ] && avail=1
 if [ -z "$right" ]; then
   out="$left"; path="left-only"
 else
