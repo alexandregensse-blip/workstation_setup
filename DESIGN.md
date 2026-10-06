@@ -119,6 +119,7 @@ Missing flag values fail fast with a clear message (guarded against `set -u`).
 task [--here | --at <path>] [repo] [topic]   # start a task (runs in the current tab)
 task resume                                   # reopen clones (checkbox menu), each in a new tab, CONTINUE its Claude session
 task list                                     # read-only status of all clones (running/idle, login, git state) + logins
+task shell [name]                             # bash inside a running task's container (docker exec)
 task cleanup [-y] | -f | <name>               # delete clones; -f (checklist) or <name> also discards work
 task settings                                 # show/edit features (notifications, language, theme, cpus/ram, DNS, launch defaults)
 task toolchain [<repo>]                       # scaffold/edit a repo's extra toolchains → its own image (see §7)
@@ -167,6 +168,10 @@ task auth [<name> | rm <name>]                # manage Claude logins (independen
    the container with `claude --continue` so the saved conversation resumes. **`task list`** is a
    read-only status view (running/idle, which login, git state, + a logins summary; running containers
    are matched to clones by their `/work` mount source via `docker inspect --format`, so no host jq).
+   **`task shell [name]`** opens a `bash` in a running task container (`docker exec -it -w /work`,
+   containers matched by `ancestor=workstation` + `name=^task-`), alongside its Claude session;
+   exiting only closes that shell. Several running → single-select menu; `[name]` filters by
+   container name. No `-l`: the image's env is already set and a login shell sources `.profile`.
    **`task cleanup`** removes clones that are clean and fully pushed; `-f`/`--force` opens a **checkbox
    menu** to discard clones *including* their uncommitted/unpushed work, and `task cleanup <name>`
    targets matching clone(s) (with `-f` to discard their work). `cleanup` runs in **two passes** —

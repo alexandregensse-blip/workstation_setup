@@ -66,6 +66,7 @@ task --here <repo> [topic]       # base = current directory
 task --at /path <repo> [topic]   # base = given path
 task resume                      # reopen task clones (checkbox menu), CONTINUING their Claude session — one pick runs here, several open a tab each
 task list                        # status of every clone: running/idle, which login, git state — plus a logins summary
+task shell [name]                # open a bash inside a running task's container (Claude keeps running when you exit)
 task cleanup [-y]                # delete clones that are clean AND fully pushed (asks; -y skips the prompt)
 task cleanup -f                  # checkbox menu to DISCARD clones incl. uncommitted/unpushed work
 task cleanup <name> [-f]         # target clone(s) matching <name>; -f also discards their work
@@ -142,6 +143,11 @@ task resume
 **See what's running and which login each task uses** (read-only; includes git state + logins):
 ```bash
 task list
+```
+
+**Open a terminal inside a running task** (next to its Claude session; one running → straight in, several → menu):
+```bash
+task shell [name]
 ```
 
 **Delete finished clones** — only those that are clean AND fully pushed are removed:

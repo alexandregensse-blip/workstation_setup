@@ -102,6 +102,9 @@ task — isolated Claude sessions in disposable containers.
                                                each in a new tab and CONTINUE its Claude conversation.
   task list                                    Read-only status of every task clone (running/idle, which login,
                                                git state) plus a logins summary. (aliases: ls, ps)
+  task shell [name]                            Open a bash inside a RUNNING task's container (next to its
+                                               Claude session; exiting it leaves Claude running). Several
+                                               running → pick in a menu; [name] matches the container name.
   task cleanup [-y]                            Delete task clones that are clean AND fully pushed.
                                                Asks per clone; -y / --yes deletes without asking.
                                                Clones with uncommitted/unpushed work are kept (need -f).
@@ -314,6 +317,31 @@ _task_resume(){
   local i; for i in "${_TASK_PICKED_IDX[@]}"; do
     echo "→ opening $(_task_clone_label "${clones[$i]}")"; _task_newtab "task open $(printf %q "${clones[$i]}")"
   done
+}
+
+# shell: open an extra bash inside a RUNNING task container (docker exec), next to its Claude session.
+# Exiting that shell only closes the shell — Claude and the container keep running.
+#   task shell           one running task → straight in; several → pick in a menu
+#   task shell <name>    the running task whose container name contains <name>
+_task_running_names(){ $(_task_dock) ps --filter ancestor=workstation --filter name=^task- --format '{{.Names}}' 2>/dev/null; }
+_task_shell(){
+  local -a names; mapfile -t names < <(_task_running_names)
+  [ "${#names[@]}" -gt 0 ] || { echo "task: no running task."; return 0; }
+  if [ -n "${1:-}" ]; then
+    local -a hit=(); local n
+    for n in "${names[@]}"; do case "$n" in *"$1"*) hit+=("$n") ;; esac; done
+    [ "${#hit[@]}" -gt 0 ] || { echo "task: no running task matches '$1'."; return 1; }
+    names=("${hit[@]}")
+  fi
+  local target="${names[0]}"
+  if [ "${#names[@]}" -gt 1 ]; then
+    _task_select "Open a shell in which task?" "${names[@]}"; local rc=$?
+    [ "$rc" = 2 ] && { echo "task: several running tasks and no TTY to choose — pass a name."; return 1; }
+    [ "$rc" = 0 ] || { echo "task: cancelled."; return 0; }
+    target="$_TASK_SEL"
+  fi
+  echo "→ shell in $target (exit to leave; Claude keeps running)"
+  $(_task_dock) exec -it -w /work "$target" bash
 }
 
 # Remove now-empty <repo> dirs under each scanned base (default + recorded) after a cleanup.
@@ -1503,6 +1531,7 @@ task() {
     resume)   _task_resume; return $? ;;
     cleanup)  shift; _task_cleanup "$@"; return $? ;;
     list|ls|ps) _task_list; return $? ;;
+    shell)    shift; _task_shell "$@"; return $? ;;
     settings) _task_settings; return $? ;;
     toolchain|toolchains) shift; _task_toolchain "$@"; return $? ;;
     open)    [ -n "${2:-}" ] || { echo "usage: task open <clone-dir>"; return 1; }; _task_run "$2" "$(basename "$2")" resume; return $? ;;
@@ -1571,7 +1600,7 @@ _task_complete(){
 
   if [ "$prev" = "--at" ]; then compopt -o dirnames 2>/dev/null; return 0; fi   # --at <path>
   if [ "$cword" -le 1 ]; then
-    mapfile -t COMPREPLY < <(compgen -W "list cleanup resume open settings toolchain auth help --here --at" -- "$cur")
+    mapfile -t COMPREPLY < <(compgen -W "list shell cleanup resume open settings toolchain auth help --here --at" -- "$cur")
     return 0
   fi
   case "$sub" in
@@ -1579,6 +1608,7 @@ _task_complete(){
       local clones; clones="$(_task_all_clones 2>/dev/null | while IFS= read -r c; do _task_clone_label "$c"; done | tr '\n' ' ')"
       mapfile -t COMPREPLY < <(compgen -W "-f -y $clones" -- "$cur") ;;
     open)     compopt -o dirnames 2>/dev/null ;;                                # open <clone-dir>
+    shell)    [ "$cword" -eq 2 ] && mapfile -t COMPREPLY < <(compgen -W "$(_task_running_names | tr '\n' ' ')" -- "$cur") ;;
     toolchain|toolchains)
       mapfile -t COMPREPLY < <(compgen -W "$(_task_toolchain_list 2>/dev/null | tr '\n' ' ')" -- "$cur") ;;
     auth)
