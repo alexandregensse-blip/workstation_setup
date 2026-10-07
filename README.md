@@ -54,8 +54,11 @@ IPv6** by *creating* `/etc/docker/daemon.json` (only if absent — it never edit
 restarting docker. It's **recorded** so `uninstall.sh` reverts it, and you can skip it with
 `--no-ipv6`. See [Networking](#networking-ipv6).
 
+Opt-in only: the `sandbox` feature needs an AppArmor profile copied to `/etc/apparmor.d/` by hand
+(not done by install, not reverted by uninstall). See [Claude Code sandbox](#claude-code-sandbox-in-a-task).
+
 **Inside the Docker image** (Wolfi / `apk`): `bash`, `curl`, `git`, `ripgrep`, `python3`, `gh`, `jq`,
-`shadow`, `ca-certificates`, plus `uv`, Claude Code, **rtk** — and the baked config
+`shadow`, `ca-certificates`, `bubblewrap`, `socat`, plus `uv`, Claude Code, **rtk** — and the baked config
 (settings + rtk hooks + statusline). **Serena** is added per repo, only where it's turned on.
 
 ## Work
@@ -112,6 +115,7 @@ environment stays clean). They take effect on the next task, no rebuild:
 | `dns` | reliable resolvers for the container, e.g. `1.1.1.1 8.8.8.8` (flaky-network hotspots) |
 | `cpus` / `ram` | container resource limits per task — `cpus` (e.g. `2`, `1.5`) and `ram` (e.g. `512m`, `4g`). Defaults `2` / `4g` |
 | `claude_mode` / `claude_model` / `claude_effort` | launch defaults: `--permission-mode` / `--model` / `--effort` (the container is the sandbox, so `auto` is reasonable) |
+| `sandbox` | `on` lets Claude Code's own sandbox (`/sandbox`, nested bubblewrap) start inside the task. Per repo: `sandbox.<owner>-<repo>=on`. Needs the host AppArmor profile — see [Claude Code sandbox](#claude-code-sandbox-in-a-task). Not in the `task settings` menu yet: edit `.config` |
 
 > Each also accepts an ad-hoc env override (`WORKSTATION_NOTIFY`, `WORKSTATION_CLAUDE_MODE`, …) for a
 > one-off, but we never write those to your `~/.bashrc`.
@@ -318,6 +322,30 @@ skipped on its own. Requires a recent Docker (NAT66 / `ip6tables` is stable sinc
 
 Still-flaky DNS on a given network (e.g. a phone hotspot)? Set the `dns` feature (`task settings`, or
 a one-off `WORKSTATION_DNS="1.1.1.1 8.8.8.8"`) and `task` passes those resolvers to the container.
+
+## Claude Code sandbox in a task
+
+Claude Code's sandbox (`/sandbox`) runs commands under **bubblewrap**, which nests user namespaces.
+Docker's defaults block that, and so does Ubuntu's host setting
+`kernel.apparmor_restrict_unprivileged_userns=1` (its `bwrap-userns-restrict` profile even attaches to
+the container's `/usr/bin/bwrap`). The image ships `bubblewrap` + `socat`; a repo with `sandbox=on`
+runs its tasks with:
+
+- `--security-opt apparmor=workstation-sandbox` — a dedicated profile (`apparmor/workstation-sandbox`):
+  docker-default's `/proc` and `/sys` protections, plus `userns`, `mount`, `pivot_root`. It has **no
+  attachment path**, so it confines nothing on the host unless a container asks for it by name;
+- `--security-opt seccomp=unconfined` — Docker's seccomp filter blocks `unshare`;
+- `--security-opt systempaths=unconfined` — lifts Docker's `/proc` masks, so the nested bwrap can mount
+  a fresh `/proc` (the profile still denies `kcore`, `sysrq-trigger`, …).
+
+Still unprivileged (no `--privileged`, no added capability). The host sysctl, its `bwrap` profile and
+every other program are left alone. **One-time host step** (sudo, writes outside the workspace):
+```bash
+sudo cp <workspace>/.workstation/apparmor/workstation-sandbox /etc/apparmor.d/ \
+  && sudo apparmor_parser -r /etc/apparmor.d/workstation-sandbox
+```
+Without it, a `sandbox=on` task fails to start (unknown AppArmor profile). Remove with
+`sudo apparmor_parser -R /etc/apparmor.d/workstation-sandbox && sudo rm /etc/apparmor.d/workstation-sandbox`.
 
 ## Image
 

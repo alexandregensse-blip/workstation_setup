@@ -38,6 +38,7 @@ self-contained `<workspace>/.workstation` dir** — the host is left in its init
 | `shell/build-progress.sh` | Shared live build meter (`_ws_build_meter`), sourced by `task.sh` + `update.sh`. |
 | `.github/workflows/shellcheck.yml` | CI lint (shellcheck) over the shell scripts; signal-only. |
 | `serena/` | The **opt-in** Serena layer: `Dockerfile` (appended to a repo's image when `serena` is on for it), `CLAUDE.md` (code-exploration policy) and `hooks.json`. Policy + hooks ship inert in the image; see §9. |
+| `apparmor/workstation-sandbox` | Host AppArmor profile for tasks with the `sandbox` feature (loaded by hand on the host; see §7b). |
 | `claude/settings.json` | Claude prefs **+ hooks** (rtk, WhatsApp notifier). Baked into the image. No hardcoded language. |
 | `claude/statusline.sh` | Custom status line. Baked into the image. |
 | `dev/CLAUDE.md` | Multi-repo working convention. Baked into the image. |
@@ -242,6 +243,30 @@ when it detects routable host IPv6 (§5, step 5): it creates `/etc/docker/daemon
 `fixed-cidr-v6` + `ip6tables`, giving containers the same reach. Opt out with `--no-ipv6`. For a
 network with flaky DNS, the `dns` feature (`task settings`) makes `task` pass those resolvers via
 `--dns`. (Requires a recent Docker — NAT66 / `ip6tables` stable since Docker 27.)
+
+## 7b. Claude Code sandbox inside a task (`sandbox` feature)
+
+Claude Code's sandbox (`/sandbox`) wraps commands in **bubblewrap**, which needs **nested** user
+namespaces and a fresh `/proc` mount. Three things block that in a task container: Docker's seccomp
+filter (`unshare`), Docker's `/proc` masks (a new procfs can't be mounted over masked paths), and on
+Ubuntu the host's `kernel.apparmor_restrict_unprivileged_userns=1` — whose `bwrap-userns-restrict`
+profile attaches **by path** to the container's `/usr/bin/bwrap` when the container is AppArmor-
+unconfined, so the inner bwrap falls into `unpriv_bwrap` and is denied.
+
+`sandbox=on` (global or `sandbox.<repokey>`, read with `_task_cfg_r`) adds to `docker run`:
+`seccomp=unconfined`, `apparmor=workstation-sandbox`, `systempaths=unconfined`. The profile
+(`apparmor/workstation-sandbox`) is docker-default's `/proc`/`/sys` denies + `userns`, `mount`,
+`pivot_root`; programs exec'd inside **inherit** it, so the host bwrap profile never attaches. It has
+no attachment path → inert on the host unless a container names it.
+
+Rejected, by host impact: setting the sysctl to `0` (every unprivileged host process could create
+user namespaces); editing `local/bwrap-userns-restrict` (affects every bwrap on the host, Flatpak
+included); `apparmor=unconfined` alone (first-level bwrap works, the nested one is denied); copying
+bwrap off `/usr/bin` (the unconfined container falls under `unprivileged_userns` → uid map denied).
+
+Loading the profile is a **manual, one-time host step** (`sudo cp` to `/etc/apparmor.d/` +
+`apparmor_parser -r`; see README) — neither install nor uninstall touches it. `bubblewrap` + `socat`
+are in `Dockerfile.base` (< 1 MB, inert without the feature).
 
 ## 8. Auth model
 
