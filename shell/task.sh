@@ -1284,6 +1284,12 @@ _task_run(){
   local _cpus _ram
   _cpus="$(_task_cfg_r cpus "$_repokey")"; _ram="$(_task_cfg_r ram "$_repokey")"
 
+  # Claude Code's own sandbox (bubblewrap) needs user namespaces, which Docker's default seccomp and
+  # AppArmor profiles block. Config 'sandbox=on' (global or 'sandbox.<repokey>') lifts both filters for
+  # that task only — weaker isolation from the host, but still unprivileged (no --privileged, no caps).
+  local -a sandbox_opts=()
+  [ "$(_task_cfg_r sandbox "$_repokey")" = on ] && sandbox_opts=(--security-opt seccomp=unconfined --security-opt apparmor=unconfined)
+
   # Conversation history persists per-clone on the HOST (survives the disposable --rm container; resume
   # continues it). Inside .git/ so it's out of the worktree and removed with the clone. mkdir first so
   # the bind source is owned by the host user (uid 1000 = the image's 'dev'), not root-created by docker.
@@ -1414,6 +1420,7 @@ _task_run(){
     "${skillmount[@]}" \
     "${resume_env[@]}" \
     "${wa_args[@]}" \
+    "${sandbox_opts[@]}" \
     --memory="${_ram:-4g}" --cpus="${_cpus:-2}" \
     "$image" "${claude_cmd[@]}"
 
