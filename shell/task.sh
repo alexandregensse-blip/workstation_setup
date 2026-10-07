@@ -1284,11 +1284,14 @@ _task_run(){
   local _cpus _ram
   _cpus="$(_task_cfg_r cpus "$_repokey")"; _ram="$(_task_cfg_r ram "$_repokey")"
 
-  # Claude Code's own sandbox (bubblewrap) needs user namespaces, which Docker's default seccomp and
-  # AppArmor profiles block. Config 'sandbox=on' (global or 'sandbox.<repokey>') lifts both filters for
-  # that task only — weaker isolation from the host, but still unprivileged (no --privileged, no caps).
+  # Claude Code's own sandbox (nested bubblewrap) needs user namespaces and a fresh /proc mount, which
+  # Docker's defaults block. Config 'sandbox=on' (global or 'sandbox.<repokey>') runs that task with:
+  # no seccomp filter, the host AppArmor profile 'workstation-sandbox' (apparmor/, must be loaded on the
+  # host — it allows userns and keeps docker-default's /proc and /sys denies) and Docker's /proc masks
+  # lifted. Still unprivileged (no --privileged, no added caps).
   local -a sandbox_opts=()
-  [ "$(_task_cfg_r sandbox "$_repokey")" = on ] && sandbox_opts=(--security-opt seccomp=unconfined --security-opt apparmor=unconfined)
+  [ "$(_task_cfg_r sandbox "$_repokey")" = on ] && sandbox_opts=(--security-opt seccomp=unconfined \
+    --security-opt apparmor=workstation-sandbox --security-opt systempaths=unconfined)
 
   # Conversation history persists per-clone on the HOST (survives the disposable --rm container; resume
   # continues it). Inside .git/ so it's out of the worktree and removed with the clone. mkdir first so

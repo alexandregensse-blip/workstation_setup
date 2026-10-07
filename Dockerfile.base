@@ -41,7 +41,7 @@ RUN i=1; until curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/in
 # on your servers. Base is committed, so a baked key would leak — runtime injection keeps it out of layers.
 #
 # bubblewrap + socat = what Claude Code's own sandbox needs on Linux. They only work in a task run with
-# the per-repo 'sandbox=on' setting (task.sh relaxes seccomp/AppArmor so user namespaces are allowed).
+# the per-repo 'sandbox=on' setting (task.sh runs it under the apparmor/workstation-sandbox profile).
 #
 # Last layer on purpose: rebuilds reuse all the cached toolchain layers above.
 USER root
