@@ -1293,6 +1293,12 @@ _task_run(){
   [ "$(_task_cfg_r sandbox "$_repokey")" = on ] && sandbox_opts=(--security-opt seccomp=unconfined \
     --security-opt apparmor=workstation-sandbox --security-opt systempaths=unconfined)
 
+  # WebSearch cap per session (shared by all agents; Claude's default is 200). Config 'web_searches'
+  # (global or 'web_searches.<repokey>') → CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION, read at session start.
+  local -a websearch_env=(); local _ws_max
+  _ws_max="$(_task_cfg_r web_searches "$_repokey")"
+  [ -n "$_ws_max" ] && websearch_env=(-e "CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION=$_ws_max")
+
   # Conversation history persists per-clone on the HOST (survives the disposable --rm container; resume
   # continues it). Inside .git/ so it's out of the worktree and removed with the clone. mkdir first so
   # the bind source is owned by the host user (uid 1000 = the image's 'dev'), not root-created by docker.
@@ -1424,6 +1430,7 @@ _task_run(){
     "${resume_env[@]}" \
     "${wa_args[@]}" \
     "${sandbox_opts[@]}" \
+    "${websearch_env[@]}" \
     --memory="${_ram:-4g}" --cpus="${_cpus:-2}" \
     "$image" "${claude_cmd[@]}"
 
